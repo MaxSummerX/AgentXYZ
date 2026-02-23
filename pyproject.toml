@@ -1,0 +1,84 @@
+[project]
+name = "agentxyz"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+dependencies = [
+    "fastapi[standard]>=0.129.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "loguru>=0.7.3",
+    "httpx>=0.28.1",
+    "litellm>=1.81.8",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-httpx>=0.35.0",
+    "pytest-mock>=3.14.0",
+    "pytest-cov>=6.0.0",
+    "mypy>=1.19.1",
+    "pre-commit>=4.3.0",
+    "ruff>=0.15.0",
+    "bandit>=1.8.3"
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+exclude = ["venv", ".venv", ".git", "__pycache__", ".idea"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle — стиль кода: отступы, пробелы, пустые строки (PEP8)
+    "F",     # pyflakes — логические ошибки: неиспользуемые импорты, неопределённые переменные
+    "I",     # isort — порядок и группировка импортов
+    "N",     # pep8-naming — соглашения об именовании: классы CamelCase, функции snake_case
+    "W",     # pycodestyle warnings — предупреждения: пробелы в конце строк, пустые строки
+    "B",     # flake8-bugbear — потенциальные баги и плохие практики
+    "C4",    # flake8-comprehensions — оптимизация list/dict/set comprehensions
+    "UP",    # pyupgrade — устаревший синтаксис: str() → f"", Optional[x] → x | None
+    "ASYNC", # flake8-async — антипаттерны в async коде: блокирующие вызовы в корутинах
+    "RUF",   # ruff-specific — собственные правила ruff: неоднозначный Unicode, лишние noqa
+    "TCH",   # flake8-type-checking — импорты только для type hints переносит в TYPE_CHECKING
+]
+ignore = [
+    "E203",    # пробел перед ':' — конфликтует с Black форматтером
+    "RUF001",  # неоднозначные символы Unicode в строках (кириллица vs латиница)
+    "RUF002",  # неоднозначные символы Unicode в docstrings
+    "RUF003",  # неоднозначные символы Unicode в комментариях
+    "E501",    # строка длиннее line-length — отдано на откуп форматтеру
+    "B008",    # вызов функции как дефолтный аргумент (нужно для FastAPI Depends)
+    "ASYNC110", # использование asyncio.sleep(0) вместо anyio
+]
+
+
+[tool.ruff.lint.isort]
+force-single-line = false
+force-sort-within-sections = false
+lines-after-imports = 1
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy",]
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".idea",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=agentxyz --cov-report=term-missing"
