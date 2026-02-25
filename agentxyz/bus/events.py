@@ -10,7 +10,7 @@ class InboundMessage:
     """Событие входящего сообщения"""
 
     channel: str  # telegram, email
-    sender: str  # ID пользователя
+    sender_id: str  # ID пользователя
     chat_id: str  # ID канала/чата
     content: str  # Текст сообщения
     timestamp: datetime = field(default_factory=datetime.now)
