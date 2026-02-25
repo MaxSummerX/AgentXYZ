@@ -1,6 +1,7 @@
 """Провайдер голосовой транскрипции."""
 
 import asyncio
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,29 @@ from faster_whisper.transcribe import TranscriptionInfo
 from loguru import logger
 
 
-class WhisperTranscriptionProvider:
+class TranscriptionProvider(ABC):
+    """
+    Абстрактный базовый класс для провайдера транскрипции аудио.
+
+    Реализации должны поддерживать согласованный интерфейс для транскрибации
+    аудиофайлов различными способами (локальные модели, API, заглушки).
+    """
+
+    @abstractmethod
+    async def transcribe(self, file_path: str | Path) -> str:
+        """
+        Транскрибировать аудиофайл.
+
+        Args:
+            file_path: Путь к аудиофайлу.
+
+        Returns:
+            Распознанный текст.
+        """
+        pass
+
+
+class WhisperTranscriptionProvider(TranscriptionProvider):
     """
     Локальный провайдер голосовой транскрипции на основе faster-whisper.
 
@@ -77,3 +100,27 @@ class WhisperTranscriptionProvider:
         except Exception as e:
             logger.error("Whisper transcription error: {}", e)
             return ""
+
+
+class StubTranscriptionProvider(TranscriptionProvider):
+    """
+    Заглушка провайдера транскрипции для тестирования.
+
+    Возвращает фиктивный текст без вызова реальных API.
+    """
+
+    def __init__(self, dummy_text: str = "Test transcription stub"):
+        self.dummy_text = dummy_text
+
+    async def transcribe(self, file_path: str | Path) -> str:
+        """
+        Заглушка транскрипции - возвращает фиктивный текст.
+
+        Args:
+            file_path: Путь к аудиофайлу (игнорируется).
+
+        Returns:
+            Фиктивный текст транскрипции.
+        """
+        logger.info("StubTranscription: returning dummy text for {}", file_path)
+        return self.dummy_text

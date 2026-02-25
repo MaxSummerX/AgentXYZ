@@ -103,6 +103,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
         supports_prompt_caching=True,
     ),
+    # AiHubMix: глобальный шлюз, OpenAI-совместимый интерфейс.
+    # strip_model_prefix=True: не понимает "anthropic/claude-3",
+    # поэтому удаляем до "claude-3", затем повторно префиксируем как "openai/claude-3".
+    ProviderSpec(
+        name="aihubmix",
+        keywords=("aihubmix",),
+        env_key="OPENAI_API_KEY",  # OpenAI-совместимый
+        display_name="AiHubMix",
+        litellm_prefix="openai",  # → openai/{model}
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=True,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="aihubmix",
+        default_api_base="https://aihubmix.com/v1",
+        strip_model_prefix=True,  # anthropic/claude-3 → claude-3 → openai/claude-3
+        model_overrides=(),
+    ),
     # === Стандартные провайдеры (сопоставляются по ключевым словам в имени модели) ===============
     # Anthropic: LiteLLM изначально распознаёт "claude-*", префикс не требуется.
     ProviderSpec(
@@ -282,7 +301,8 @@ def find_by_model(model: str) -> ProviderSpec | None:
     normalized_prefix = model_prefix.replace("-", "_")
     std_specs = [s for s in PROVIDERS if not s.is_gateway and not s.is_local]
 
-    # Предпочитайте явный префикс провайдера — предотвращает совпадение `github-copilot/...codex` с openai_codex.
+    # Явный префикс провайдера имеет приоритет над ключевыми словами.
+    # Например, `openai/gpt-4` должен найти openai, а не другой провайдер с похожими ключевыми словами.
     for spec in std_specs:
         if model_prefix and normalized_prefix == spec.name:
             return spec
