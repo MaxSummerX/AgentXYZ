@@ -76,12 +76,6 @@ class SessionManager:
     """
 
     def __init__(self, workspace: Path):
-        """
-        Инициализировать менеджер сессий.
-
-        Args:
-            workspace: Рабочая директория для хранения sessions/.
-        """
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = Path.home() / ".agentxyz" / "sessions"
@@ -120,18 +114,7 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session | None:
-        """
-        Загрузить сессию из файла.
-
-        Пытается найти файл сессии в sessions/, при отсутствии проверяет
-        устаревший путь ~/.agentxyz/sessions/ и переносит его.
-
-        Args:
-            key: Ключ сессии.
-
-        Returns:
-            Session или None, если файл не найден или ошибка чтения.
-        """
+        """Читает сессию из файла."""
         path = self._get_session_path(key)
         if not path.exists():
             legacy_path = self._get_legacy_session_path(key)
@@ -181,15 +164,7 @@ class SessionManager:
             return None
 
     def save(self, session: Session) -> None:
-        """
-        Сохранить сессию на диск в формате JSONL.
-
-        Первая строка содержит метаданные (_type=metadata),
-        остальные — сообщения по одному на строку.
-
-        Args:
-            session: Сессия для сохранения.
-        """
+        """Сохранить сессию на диск."""
         path = self._get_session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:
@@ -211,12 +186,7 @@ class SessionManager:
         self._cache[session.key] = session
 
     def invalidate(self, key: str) -> None:
-        """
-        Удалить сессию из кэша в памяти.
-
-        Args:
-            key: Ключ сессии для инвалидации.
-        """
+        """Удалить сессию из кэша в оперативной памяти."""
         self._cache.pop(key, None)
 
     def list_sessions(self) -> list[dict[str, Any]]:
