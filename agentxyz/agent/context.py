@@ -3,6 +3,8 @@
 import base64
 import mimetypes
 import platform
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -14,7 +16,7 @@ class ContextBuilder:
     """
     Строит контекст (системный промпт + сообщения) для агента.
 
-    Собирает bootstrap-файлы, память, навыки и историю разговора
+    Собирает bootstrap-файлы, идентичность, память, навыки и историю разговора
     в единый промпт для LLM.
     """
 
@@ -23,15 +25,14 @@ class ContextBuilder:
         "SOUL.md",
         "USER.md",
     ]
+    _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(
-        self, skill_names: list[str] | None = None
-    ) -> str:  # TODO: реализоавать добавляение скилов в системный пропмт
+    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Собирает системный промпт из bootstrap-файлов, памяти и навыков.
 
@@ -41,10 +42,8 @@ class ContextBuilder:
         Returns:
             Полный системный промпт.
         """
-        parts = []
-
         # Основная идентичность
-        parts.append(self._get_identity())
+        parts = [self._get_identity()]
 
         # Файлы начальной загрузки
         bootstrap = self._load_bootstrap_files()
@@ -84,11 +83,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
     def _get_identity(self) -> str:
         """Получить основную секцию идентичности."""
-        import time as _time
-        from datetime import datetime
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -97,33 +92,36 @@ Skills with available="false" need dependencies installed first - you can try in
 
 You are agentxyz, a helpful AI assistant.
 
-## Current Time
-{now} ({tz})
-
 ## Runtime
 {runtime}
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
+- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
+- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
-
-## Tool Call Guidelines
-- Before calling tools, you may briefly state your intent (e.g. "Let me check that"), but NEVER predict or describe the expected result before receiving it.
-- Before modifying a file, read it first to confirm its current content.
-- Do not assume a file or directory exists — use list_dir or read_file to verify.
+## agentxyz Guidelines
+- State intent before tool calls, but NEVER predict or claim results before receiving them.
+- Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
+- Ask for clarification when the request is ambiguous.
 
-## Memory
-- Remember important facts: write to {workspace_path}/memory/MEMORY.md
-- Recall past events: grep {workspace_path}/memory/HISTORY.md"""
+Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+
+    @staticmethod
+    def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
+        """Построить блок метаданных исполняемой среды для вставки перед пользовательским сообщением."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = time.strftime("%Z") or "UTC"
+        lines = [f"Current Time: {now} ({tz})"]
+        if channel and chat_id:
+            lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
-        """Загрузить все bootstrap-файлы из рабочего пространства."""
+        """Загрузить все загрузочные файлы из рабочего пространства."""
         parts = []
 
         for filename in self.BOOTSTRAP_FILES:
@@ -157,26 +155,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         Returns:
             Список сообщений включая системный промпт.
         """
-        messages = []
-
-        # Системный промпт
-        system_prompt = self.build_system_prompt(skill_names)
-        if channel and chat_id:
-            system_prompt += (
-                f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
-            )
-
-        messages.append({"role": "system", "content": system_prompt})
-
-        # История
-        messages.extend(history)
-
-        # Текущее сообщение (с возможными вложениями изображений)
-        user_content = self._build_user_content(current_message, media)
-        user_msg: dict[str, Any] = {"role": "user", "content": user_content}
-        messages.append(user_msg)
-
-        return messages
+        return [
+            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            *history,
+            {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
+            {
+                "role": "user",
+                "content": self._build_user_content(current_message, media),
+            },
+        ]
 
     @staticmethod
     def _build_user_content(
@@ -249,12 +236,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         Returns:
             Обновленный список сообщений.
         """
-        msg: dict[str, Any] = {"role": "assistant"}
-
-        # Пропускать пустое содержимое — некоторые бэкенды отклоняют пустые текстовые блоки
-        if content:
-            msg["content"] = content
-
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -44,6 +45,8 @@ class AgentLoop:
     4. Выполняет вызовы инструментов
     5. Отправляет ответы обратно
     """
+
+    _TOOL_RESULT_MAX_CHARS = 500
 
     def __init__(
         self,
@@ -104,7 +107,11 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = (
             set()
         )  # Сильные ссылки на активные задачи
-        self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._processing_lock = asyncio.Lock()
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -120,6 +127,7 @@ class AgentLoop:
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
+                path_append=self.exec_config.path_append,
             )
         )
 
@@ -170,17 +178,12 @@ class AgentLoop:
         self, channel: str, chat_id: str, message_id: str | None = None
     ) -> None:
         """Обновить контекст для всех инструментов, которым нужна информация о маршрутизации."""
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool):
-                message_tool.set_context(channel, chat_id, message_id)
-
-        if spawn_tool := self.tools.get("spawn"):
-            if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
-
-        if cron_tool := self.tools.get("cron"):
-            if isinstance(cron_tool, CronTool):
-                cron_tool.set_context(channel, chat_id)
+        for name in ("message", "spawn", "cron"):
+            if tool := self.tools.get(name):
+                if hasattr(tool, "set_context"):
+                    tool.set_context(
+                        channel, chat_id, *([message_id] if name == "message" else [])
+                    )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -194,7 +197,10 @@ class AgentLoop:
         """Форматирует вызовы инструментов в виде краткой подсказки, например 'web_search("query")'."""
 
         def _fmt(tc: Any) -> Any:
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            args = (
+                tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments
+            ) or {}
+            val = next(iter(args.values()), None) if isinstance(args, dict) else None
             if not isinstance(val, str):
                 return tc.name
             return (
@@ -237,12 +243,20 @@ class AgentLoop:
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
+                    # Не сохранять ошибки в историю сессии — они могут «отравить» контекст
+                    # и вызвать бесконечный цикл 400-х ошибок (#1303).
+                    if response.finish_reason == "error":
+                        logger.error("LLM returned error: {}", (clean or "")[:200])
+                        final_content = (
+                            clean
+                            or "Sorry, I encountered an error calling the AI model."
+                        )
+                        break
                     if clean:
                         await on_progress(clean)
-                    else:
-                        await on_progress(
-                            self._tool_hint(response.tool_calls), tool_hint=True
-                        )
+                    await on_progress(
+                        self._tool_hint(response.tool_calls), tool_hint=True
+                    )
 
                 tool_call_dicts = [
                     {
@@ -275,7 +289,13 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
-                final_content = self._strip_think(response.content)
+                clean = self._strip_think(response.content)
+                messages = self.context.add_assistant_message(
+                    messages,
+                    clean,
+                    reasoning_content=response.reasoning_content,
+                )
+                final_content = clean
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -299,32 +319,78 @@ class AgentLoop:
             try:
                 # Ожидание следующего сообщения
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                # Обработать его
-                try:
-                    response = await self._process_message(msg)
-                    if response is not None:
-                        await self.bus.publish_outbound(response)
-                    elif msg.channel == "cli":
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content="",
-                                metadata=msg.metadata or {},
-                            )
-                        )
-                except Exception as e:
-                    logger.error("Ошибка обработки сообщения: {}", e)
-                    # Отправить ответ об ошибке
+            except TimeoutError:
+                continue
+
+            if msg.content.strip().lower() == "/stop":
+                await self._handle_stop(msg)
+            else:
+                task = asyncio.create_task(self._dispatch(msg))
+                self._active_tasks.setdefault(msg.session_key, []).append(task)
+                task.add_done_callback(self._make_done_callback(msg.session_key))
+
+    def _make_done_callback(
+        self, session_key: str
+    ) -> Callable[[asyncio.Task[Any]], None]:
+        """Создаёт callback для удаления выполненной задачи из списка активных."""
+
+        def _remove_done(task: asyncio.Task[Any]) -> None:
+            tasks_list = self._active_tasks.get(session_key)
+            if tasks_list and task in tasks_list:
+                tasks_list.remove(task)
+
+        return _remove_done
+
+    async def _handle_stop(self, msg: InboundMessage) -> None:
+        """Отменить все активные задачи и субагенты для сессии."""
+        tasks = self._active_tasks.pop(msg.session_key, [])
+        cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+        total = cancelled + sub_cancelled
+        content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=content,
+            )
+        )
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        """Обработать сообщение под глобальной блокировкой."""
+        async with self._processing_lock:
+            try:
+                response = await self._process_message(msg)
+                if response is not None:
+                    await self.bus.publish_outbound(response)
+                elif msg.channel == "cli":
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
-                            content=f"Извините, произошла ошибка: {e!s}",
+                            content="",
+                            metadata=msg.metadata or {},
                         )
                     )
-            except TimeoutError:
-                continue
+            except asyncio.CancelledError:
+                logger.info("Задача отменена для сессии {}", msg.session_key)
+                raise
+            except Exception:
+                logger.exception(
+                    "Ошибка обработки сообщения для сессии {}", msg.session_key
+                )
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="К сожалению, произошла ошибка.",
+                    )
+                )
 
     async def close_mcp(self) -> None:
         """Закрыть MCP-соединения."""
@@ -339,19 +405,6 @@ class AgentLoop:
         """Остановить цикл агента."""
         self._running = False
         logger.info("Цикл агента останавливается")
-
-    def _get_consolidation_lock(self, session_key: str) -> asyncio.Lock:
-        """Получить блокировку консолидации для сессии."""
-        lock = self._consolidation_locks.get(session_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._consolidation_locks[session_key] = lock
-        return lock
-
-    def _prune_consolidation_lock(self, session_key: str, lock: asyncio.Lock) -> None:
-        """Удалить запись блокировки, если она больше не используется."""
-        if not lock.locked():
-            self._consolidation_locks.pop(session_key, None)
 
     async def _process_message(
         self,
@@ -409,7 +462,7 @@ class AgentLoop:
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             # Захватить сообщения перед очисткой (избежать race condition с фоновой задачей)
-            lock = self._get_consolidation_lock(session.key)
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             self._consolidating.add(session.key)
             try:
                 async with lock:
@@ -432,7 +485,6 @@ class AgentLoop:
                 )
             finally:
                 self._consolidating.discard(session.key)
-                self._prune_consolidation_lock(session.key, lock)
 
             session.clear()
             self.sessions.save(session)
@@ -457,7 +509,7 @@ class AgentLoop:
             and session.key not in self._consolidating
         ):
             self._consolidating.add(session.key)
-            lock = self._get_consolidation_lock(session.key)
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
 
             async def _consolidate_and_unlock() -> None:
                 try:
@@ -465,7 +517,6 @@ class AgentLoop:
                         await self._consolidate_memory(session)
                 finally:
                     self._consolidating.discard(session.key)
-                    self._prune_consolidation_lock(session.key, lock)
                     _task = asyncio.current_task()
                     if _task is not None:
                         self._consolidation_tasks.discard(_task)
@@ -509,24 +560,28 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
+        # Сохранить в сеанс
+        self._save_turn(session, all_msgs, 1 + len(history))
+        self.sessions.save(session)
+
+        if (
+            (mt := self.tools.get("message"))
+            and isinstance(mt, MessageTool)
+            and mt._sent_in_turn
+        ):
+            return None
+
         preview = (
             final_content[:120] + "..." if len(final_content) > 120 else final_content
         )
         logger.info("Ответ от {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        # Сохранить в сеанс
-        self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
-
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-                return None
-
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # Пропустить для специфичных нужд канала
+            metadata=msg.metadata
+            or {},  # Пропустить для специфичных нужд канала (например, thread_ts в Slack)
         )
 
     _TOOL_RESULT_MAX_CHARS = 500
@@ -537,12 +592,34 @@ class AgentLoop:
 
         for m in messages[skip:]:
             entry = {k: v for k, v in m.items() if k != "reasoning_content"}
-            if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
-                content = entry["content"]
-                if len(content) > self._TOOL_RESULT_MAX_CHARS:
-                    entry["content"] = (
-                        content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
-                    )
+            role, content = entry.get("role"), entry.get("content")
+            if role == "assistant" and not content and not entry.get("tool_calls"):
+                continue  # skip empty assistant messages — they poison session context
+            if (
+                role == "tool"
+                and isinstance(content, str)
+                and len(content) > self._TOOL_RESULT_MAX_CHARS
+            ):
+                entry["content"] = (
+                    content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+                )
+            elif role == "user":
+                if isinstance(content, str) and content.startswith(
+                    ContextBuilder._RUNTIME_CONTEXT_TAG
+                ):
+                    continue
+                if isinstance(content, list):
+                    entry["content"] = [
+                        {"type": "text", "text": "[image]"}
+                        if (
+                            c.get("type") == "image_url"
+                            and c.get("image_url", {})
+                            .get("url", "")
+                            .startswith("data:image/")
+                        )
+                        else c
+                        for c in content
+                    ]
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
