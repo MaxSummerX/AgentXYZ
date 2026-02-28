@@ -7,73 +7,62 @@ from typing import Any
 
 from loguru import logger
 
-
-# Интервал по умолчанию: 30 минут
-DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
-
-# Токен, обозначающий "ничего не делать"
-HEARTBEAT_OK_TOKEN = "HEARTBEAT_OK"
-
-# Промпт, отправляемый агенту при heartbeat
-HEARTBEAT_PROMPT = (
-    "Read HEARTBEAT.md in your workspace and follow any instructions listed there. "
-    f"If nothing needs attention, reply with exactly: {HEARTBEAT_OK_TOKEN}"
-)
+from agentxyz.providers.base import LLMProvider
 
 
-def _is_heartbeat_empty(content: str | None) -> bool:
-    """Проверить, нет ли задач в HEARTBEAT.md."""
-    if not content:
-        return True
-
-    # Пропускаемые строки: пустые, заголовки, HTML-комментарии, пустые чекбоксы
-    skip_patterns = {"- [ ]", "* [ ]", "- [x]", "* [x]"}
-
-    for line in content.split("\n"):
-        line = line.strip()
-        if (
-            not line
-            or line.startswith("#")
-            or line.startswith("<!--")
-            or line in skip_patterns
-        ):
-            continue
-        return False  # Найдено содержимое для выполнения
-
-    return True
+_HEARTBEAT_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "heartbeat",
+            "description": "Report heartbeat decision after reviewing tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["skip", "run"],
+                        "description": "skip = nothing to do, run = has active tasks",
+                    },
+                    "tasks": {
+                        "type": "string",
+                        "description": "Natural-language summary of active tasks (required for run)",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    }
+]
 
 
 class HeartbeatService:
     """
     Периодический сервис пробуждения агента для проверки задач.
 
-    Агент читает HEARTBEAT.md из рабочей области и выполняет указанные
-    там задачи. Если есть что сообщить, ответ пересылается пользователю через
-    on_notify. Если действий не требуется, агент отвечает HEARTBEAT_OK,
-    и ответ автоматически отбрасывается.
+    Phase 1 (decision): читает HEARTBEAT.md и спрашивает LLM — через виртуальный
+    вызов инструмента — есть ли активные задачи. Это позволяет избежать
+    парсинга свободного текста и ненадёжного токена HEARTBEAT_OK.
+
+    Phase 2 (execution): запускается только если Phase 1 вернул ``run``.
+    Колбэк ``on_execute`` выполняет задачу через полный цикл агента и
+    возвращает результат для доставки
     """
 
     def __init__(
         self,
         workspace: Path,
-        on_heartbeat: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        provider: LLMProvider,
+        model: str,
+        on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        interval_s: int = DEFAULT_HEARTBEAT_INTERVAL_S,
+        interval_s: int = 30 * 60,
         enabled: bool = True,
     ):
-        """
-        Инициализировать сервис heartbeat.
-
-        Args:
-            workspace: Рабочая директория с HEARTBEAT.md.
-            on_heartbeat: Асинхронная функция, вызываемая с промптом для агента.
-                          Возвращает ответ агента.
-            on_notify: Асинхронная функция для отправки уведомлений пользователю.
-            interval_s: Интервал между проверками в секундах.
-            enabled: Включён ли сервис.
-        """
         self.workspace = workspace
-        self.on_heartbeat = on_heartbeat
+        self.provider = provider
+        self.model = model
+        self.on_execute = on_execute
         self.on_notify = on_notify
         self.interval_s = interval_s
         self.enabled = enabled
@@ -82,7 +71,6 @@ class HeartbeatService:
 
     @property
     def heartbeat_file(self) -> Path:
-        """Путь к файлу HEARTBEAT.md в рабочей директории."""
         return self.workspace / "HEARTBEAT.md"
 
     def _read_heartbeat_file(self) -> str | None:
@@ -94,13 +82,44 @@ class HeartbeatService:
                 return None
         return None
 
+    async def _decide(self, content: str) -> tuple[str, str]:
+        """
+        Phase 1: запрашивает у LLM решение пропустить/выполнить через виртуальный вызов инструмента.
+
+        Возвращает (action, tasks), где action — 'skip' или 'run'.
+        """
+        response = await self.provider.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+                        f"{content}"
+                    ),
+                },
+            ],
+            tools=_HEARTBEAT_TOOL,
+            model=self.model,
+        )
+
+        if not response.has_tool_calls:
+            return "skip", ""
+
+        args = response.tool_calls[0].arguments
+        return args.get("action", "skip"), args.get("tasks", "")
+
     async def start(self) -> None:
         """Запустить сервис heartbeat."""
         if not self.enabled:
             logger.info("Heartbeat отключён")
             return
 
-        if self._task is not None:
+        if self._running:
+            logger.warning("Heartbeat уже запущен")
             return
 
         self._running = True
@@ -131,28 +150,36 @@ class HeartbeatService:
         content = self._read_heartbeat_file()
 
         # Пропуск, если HEARTBEAT.md пуст или не существует
-        if _is_heartbeat_empty(content):
+        if not content:
             logger.debug("Heartbeat: нет задач (HEARTBEAT.md пуст)")
             return
 
         logger.info("Heartbeat: проверка задач...")
 
-        if self.on_heartbeat:
-            try:
-                response = await self.on_heartbeat(HEARTBEAT_PROMPT)
+        try:
+            action, tasks = await self._decide(content)
 
-                # Проверить, ответил ли агент "ничего не делать"
-                if HEARTBEAT_OK_TOKEN in response.upper():
-                    logger.info("Heartbeat: OK (действий не требуется)")
-                else:
-                    logger.info("Heartbeat: задача выполнена")
-                    if self.on_notify:
-                        await self.on_notify(response)
-            except Exception:
-                logger.exception("Heartbeat execution failed")
+            # Проверить, ответил ли агент "ничего не делать"
+            if action != "run":
+                logger.info("Heartbeat: OK (действий не требуется)")
+                return
+
+            logger.info("Heartbeat: задачи найдены, выполнение...")
+
+            if self.on_execute:
+                response = await self.on_execute(tasks)
+                if response and self.on_notify:
+                    logger.info("Heartbeat: завершено, доставка ответа")
+                    await self.on_notify(response)
+        except Exception:
+            logger.exception("Сбой выполнения Heartbeat")
 
     async def trigger_now(self) -> str | None:
         """Запустить heartbeat вручную."""
-        if self.on_heartbeat:
-            return await self.on_heartbeat(HEARTBEAT_PROMPT)
-        return None
+        content = self._read_heartbeat_file()
+        if not content:
+            return None
+        action, tasks = await self._decide(content)
+        if action != "run" or not self.on_execute:
+            return None
+        return await self.on_execute(tasks)
