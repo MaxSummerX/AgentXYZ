@@ -1,6 +1,8 @@
 """Реализация провайдера LiteLLM для поддержки множества провайдеров"""
 
 import os
+import secrets
+import string
 from typing import Any
 
 import json_repair
@@ -12,7 +14,15 @@ from agentxyz.providers.registry import find_by_model, find_gateway
 
 
 # Стандартные ключи сообщений OpenAI chat-completion; дополнительные (например, reasoning_content) удаляются для строгих провайдеров.
-_ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+_ALLOWED_MSG_KEYS = frozenset(
+    {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+)
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _short_tool_id() -> str:
+    """Сгенерировать 9-символьный буквенно-цифровой идентификатор, совместимый со всеми провайдерами (включая Mistral)."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
 class LiteLLMProvider(LLMProvider):
@@ -288,7 +298,7 @@ class LiteLLMProvider(LLMProvider):
                 # Создаём объект ToolCallRequest для каждого вызова и добавляем в список
                 tool_calls.append(
                     ToolCallRequest(
-                        id=tool_call.id,
+                        id=_short_tool_id(),
                         name=tool_call.function.name,
                         arguments=args,
                     )

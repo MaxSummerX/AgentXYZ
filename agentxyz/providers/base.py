@@ -16,7 +16,7 @@ class ToolCallRequest:
 
 @dataclass
 class LLMResponse:
-    """Ответ от провайдера LLM."""
+    """Ответ от провайдера LLM услуг."""
 
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
