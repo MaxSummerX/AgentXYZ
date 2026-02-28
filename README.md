@@ -32,7 +32,7 @@
   - **Оригинал**: Groq API → **AgentXYZ**: faster-whisper medium (локальный, офлайн)
   - Модель "medium" — баланс веса/качества для русского языка
 
-- **tools/web.py** — полностью переработан (172→557 строк)
+- **tools/web.py** — полностью переработан
   - **WebSearchTool**: fallback с 4 движками (Exa → Tavily → DDGS → Brave)
   - **WebFetchTool**: fallback с 3 методами (Tavily → Exa → Readability), Readability принимает markdown от CDN/Cloudflare
 
@@ -192,6 +192,23 @@ agentxyz gateway
 | `anthropic` | Claude | [console.anthropic.com](https://console.anthropic.com) |
 | `openai` | GPT | [platform.openai.com](https://platform.openai.com) |
 | `deepseek` | DeepSeek | [platform.deepseek.com](https://platform.deepseek.com) |
+
+### API ключи для веб-инструментов
+
+Для работы веб-поиска и извлечения контента создайте `.env` файл в корне проекта:
+
+```bash
+# ~/.agentxyz/.env или .env в корне проекта
+EXA_API_KEY=your_exa_api_key
+TAVILY_API_KEY=your_tavily_api_key
+BRAVE_API_KEY=your_brave_api_key
+```
+
+| API ключ | Назначение | Получить |
+|----------|------------|----------|
+| `EXA_API_KEY` | Web-поиск и извлечение (рекомендуется) | [exa.ai](https://exa.ai) |
+| `TAVILY_API_KEY` | Web-поиск и извлечение | [tavily.com](https://tavily.com) |
+| `BRAVE_API_KEY` | Web-поиск (fallback) | [search.brave.com/api](https://search.brave.com/api) |
 
 ## 🛠️ CLI команды
 
