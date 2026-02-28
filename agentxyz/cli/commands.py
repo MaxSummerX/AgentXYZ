@@ -25,6 +25,7 @@ from rich.text import Text
 from agentxyz import __logo__, __version__
 from agentxyz.config.schema import Config
 from agentxyz.providers import CustomProvider, LiteLLMProvider
+from agentxyz.utils.helpers import sync_workspace_templates
 
 
 app = typer.Typer(
@@ -209,7 +210,7 @@ def onboard() -> None:
         )
 
     # Создать файлы bootstrap по умолчанию
-    _create_workspace_templates(workspace)
+    sync_workspace_templates(workspace)
 
     console.print(f"\n{__logo__} agentxyz готов к работе!")
     console.print("\nДальнейшие действия:")
@@ -217,41 +218,6 @@ def onboard() -> None:
     console.print("     Возьмите тут: https://openrouter.ai/keys")
     console.print("  2. Запустите Gateway: [cyan]agentxyz gateway[/cyan]")
     console.print("     Или диалог: [cyan]agentxyz agent[/cyan]")
-
-
-def _create_workspace_templates(workspace: Path) -> None:
-    """Создать файлы шаблона рабочей области по умолчанию."""
-    from importlib.resources import files as pkg_files
-
-    templates_dir = pkg_files("agentxyz") / "templates"
-
-    for item in templates_dir.iterdir():
-        if not item.name.endswith(".md"):
-            continue
-        dest = workspace / item.name
-        if not dest.exists():
-            dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
-            console.print(f"  [dim]Создан {item.name}[/dim]")
-
-    # Создать директорию memory и MEMORY.md
-    memory_dir = workspace / "memory"
-    memory_dir.mkdir(exist_ok=True)
-
-    memory_template = templates_dir / "memory" / "MEMORY.md"
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        memory_file.write_text(
-            memory_template.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        console.print("  [dim]Cоздан memory/MEMORY.md[/dim]")
-
-    history_file = memory_dir / "HISTORY.md"
-    if not history_file.exists():
-        history_file.write_text("", encoding="utf-8")
-        console.print("  [dim]Cоздан memory/HISTORY.md[/dim]")
-
-    # Создать каталог skills для пользовательских навыков
-    (workspace / "skills").mkdir(exist_ok=True)
 
 
 def _make_provider(
@@ -319,6 +285,7 @@ def gateway(
     console.print(f"{__logo__} Запуск agentxyz Gateway на порту {port}...")
 
     config = load_config()
+    sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
@@ -407,15 +374,15 @@ def gateway(
         return "cli", "direct"
 
     # Создать сервис heartbeat
-    async def on_heartbeat(prompt: str) -> str:
-        """Выполнить heartbeat через агента."""
+    async def on_heartbeat_execute(tasks: str) -> str:
+        """Фаза 2: выполнение heartbeat-задач через полный цикл агента."""
         channel, chat_id = _pick_heartbeat_target()
 
         async def _silent(*_args: Any, **_kwargs: Any) -> None:
             pass
 
         return await agent.process_direct(
-            prompt,
+            tasks,
             session_key="heartbeat",
             channel=channel,
             chat_id=chat_id,
@@ -433,12 +400,16 @@ def gateway(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)
         )
 
+    hb_cfg = config.gateway.heartbeat
+
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
+        provider=provider,
+        model=agent.model,
+        on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
-        interval_s=30 * 60,  # 30 минут
-        enabled=True,
+        interval_s=hb_cfg.interval_s,
+        enabled=hb_cfg.enabled,
     )
 
     # Вывод статуса
@@ -451,12 +422,12 @@ def gateway(
         console.print(
             f"[green]✓[/green] Каналы: {', '.join(channels.enabled_channels)}"
         )
+    else:
+        console.print("[yellow]Предупреждение: нет активных каналов[/yellow]")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
-        console.print(
-            f"[green]✓[/green] Cron: {cron_status['jobs']} задач по расписанию"
-        )
+        console.print(f"[green]✓[/green] Cron: {hb_cfg.interval_s} задач по расписанию")
 
     console.print("[green]✓[/green] Heartbeat: раз в полчаса")
 
@@ -534,7 +505,7 @@ def agent(
     from agentxyz.cron.service import CronService
 
     config = load_config()
-
+    sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
 
