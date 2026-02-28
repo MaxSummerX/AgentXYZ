@@ -14,6 +14,8 @@ __version__ = "0.1.0"
 
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import AsyncIterator
+
 
 from agentxyz.gateway.auth import GatewayAuth
 from agentxyz.gateway.schemas import RootResponse
@@ -174,7 +176,7 @@ class GatewayServer:
 
         # Создать app с lifespan
         @asynccontextmanager
-        async def lifespan(app: FastAPI) -> Any:
+        async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Startup
             self._running = True
             logger.info("Gateway приложение запущено")
@@ -344,7 +346,7 @@ class GatewayServer:
             msg: Исходящее сообщение от агента
         """
         # Обрабатывать только сообщения для этого шлюза
-        if msg.channel != "gateway":
+        if msg.channel not in ("gateway", "fastapi"):
             return
 
         # Найти ожидающую очередь
@@ -361,6 +363,17 @@ class GatewayServer:
                 "done": True,
             }
             await self._websocket_manager.send_to_session(msg.chat_id, ws_response)
+
+    async def send(self, msg: OutboundMessage) -> None:
+        """
+        Отправить сообщение через этот канал (абстрактный метод из BaseChannel).
+
+        Delegates to receive_from_agent for compatibility with ChannelManager.
+
+        Args:
+            msg: Сообщение для отправки
+        """
+        await self.receive_from_agent(msg)
 
     async def send_to_agent(self, msg: InboundMessage) -> None:
         """
