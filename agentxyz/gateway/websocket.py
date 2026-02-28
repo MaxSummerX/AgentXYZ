@@ -61,6 +61,40 @@ class WebSocketManager:
 
         logger.debug(f"WebSocket отключён: session={session_id}")
 
+    async def update_session(self, websocket: WebSocket, new_session_id: str) -> None:
+        """
+        Обновить сессию WebSocket соединения.
+
+        Используется для peer-to-peer WebSocket, когда сессия определяется
+        из первого сообщения вместо URL параметра.
+
+        Args:
+            websocket: WebSocket соединение
+            new_session_id: Новый ID сессии
+        """
+        old_session_id = self._ws_to_session.get(websocket)
+
+        # Нечего обновлять
+        if old_session_id == new_session_id:
+            return
+
+        # Удалить из старой сессии
+        if old_session_id and old_session_id in self._connections:
+            self._connections[old_session_id].discard(websocket)
+            if not self._connections[old_session_id]:
+                del self._connections[old_session_id]
+
+        # Добавить в новую сессию
+        if new_session_id not in self._connections:
+            self._connections[new_session_id] = set()
+
+        self._connections[new_session_id].add(websocket)
+        self._ws_to_session[websocket] = new_session_id
+
+        logger.debug(
+            f"WebSocket сессия обновлена: {old_session_id} -> {new_session_id}"
+        )
+
     async def send_to_session(self, session_id: str, message: dict[str, Any]) -> None:
         """
         Отправить сообщение всем WebSocket в сессии.

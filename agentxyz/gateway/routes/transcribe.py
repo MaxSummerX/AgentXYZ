@@ -128,7 +128,7 @@ async def transcribe_endpoint(
                 device=transcribe_config.whisper_device,
                 language=effective_language,
             )
-        else:  # groq (заглушка)
+        else:  # (заглушка)
             from agentxyz.providers.transcription import StubTranscriptionProvider
 
             transcriber = StubTranscriptionProvider(
