@@ -1,4 +1,4 @@
-"""Утилиты для загрузки конфигурации."""
+"""Утилиты для загрузки конфигурации"""
 
 import json
 from pathlib import Path
@@ -52,7 +52,6 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         config: Конфигурация для сохранения.
         config_path: Опциональный путь для сохранения. Используется путь по умолчанию, если не указан.
     """
-
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 

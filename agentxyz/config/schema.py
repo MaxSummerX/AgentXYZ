@@ -1,11 +1,11 @@
-"""Схема конфигурации, использующей Pydantic."""
+"""Схема конфигурации использующий Pydantic."""
 
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Base(BaseModel):
@@ -23,9 +23,11 @@ class TelegramConfig(Base):
         default_factory=list
     )  # Разрешенные ID пользователей или имена пользователей
     proxy: str | None = (
-        None  # HTTP/SOCKS5 прокси URL, например "http://127.0.0.1:7890" или "socks5://127.0.0.1:1080"
+        None  # HTTP/SOCKS5 прокси URL, например "http://127.0.0.1:7890" или "socks5://127.0.0.1:1080
     )
-    reply_to_message: bool = False  # Если true, ответы бота цитируют исходное сообщение
+    reply_to_message: bool = (
+        False  # Если true, ответы бота цитируют исходное сообщение"
+    )
 
 
 class EmailConfig(Base):
@@ -64,6 +66,13 @@ class EmailConfig(Base):
     )  # Разрешённые адреса электронной почты отправителей
 
 
+class HeartbeatConfig(Base):
+    """Heartbeat service configuration."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
+
+
 class GatewayAuthConfig(Base):
     """Конфигурация аутентификации Gateway."""
 
@@ -80,8 +89,9 @@ class GatewayConfig(Base):
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8888
-    timeout: float = 30.0  # Таймаут ожидания ответа агента в секундах
+    timeout: float = 60.0  # Таймаут ожидания ответа агента в секундах
     auth: GatewayAuthConfig = Field(default_factory=GatewayAuthConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
 class ChannelsConfig(Base):
@@ -100,6 +110,7 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.agentxyz/workspace"
     model: str = "anthropic/claude-opus-4-6"
+    provider: str = "auto"  # Название провайдера (например, "anthropic", "openrouter") или "auto" для автоматического определения
     max_tokens: int = 8192
     temperature: float = 0.2
     max_tool_iterations: int = 40
@@ -170,6 +181,7 @@ class ExecToolConfig(Base):
     """Конфигурация shell-исполнения."""
 
     timeout: int = 60
+    path_append: str = ""
 
 
 class MCPServerConfig(Base):
@@ -195,7 +207,7 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
-class Config(Base):
+class Config(BaseSettings):
     """Корневая конфигурация для agentxyz."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -215,6 +227,11 @@ class Config(Base):
     ) -> tuple["ProviderConfig | None", str | None]:
         """Сопоставить конфигурацию провайдера и его имя в реестре. Возвращает (config, spec_name)."""
         from agentxyz.providers.registry import PROVIDERS
+
+        forced = self.agents.defaults.provider
+        if forced != "auto":
+            p = getattr(self.providers, forced, None)
+            return (p, forced) if p else (None, None)
 
         model_lower = (model or self.agents.defaults.model).lower()
         model_normalized = model_lower.replace("-", "_")
