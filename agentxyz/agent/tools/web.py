@@ -60,6 +60,16 @@ def _normalize(text: str) -> str:
 class WebSearchTool(Tool):
     """Умный поиск с fallback по приоритету."""
 
+    def __init__(
+        self,
+        exa_api_key: str | None = None,
+        tavily_api_key: str | None = None,
+        brave_api_key: str | None = None,
+    ):
+        self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
+        self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
+        self.brave_api_key = brave_api_key or os.environ.get("BRAVE_API_KEY", "")
+
     @property
     def name(self) -> str:
         return "web_search"
@@ -89,16 +99,6 @@ class WebSearchTool(Tool):
             },
             "required": ["query"],
         }
-
-    def __init__(
-        self,
-        exa_api_key: str | None = None,
-        tavily_api_key: str | None = None,
-        brave_api_key: str | None = None,
-    ):
-        self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
-        self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
-        self.brave_api_key = brave_api_key or os.environ.get("BRAVE_API_KEY", "")
 
     async def execute(  # type: ignore[override]
         self,
@@ -282,6 +282,18 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     """Универсальное извлечение контента с fallback: Tavily → Exa → Readability."""
 
+    def __init__(
+        self,
+        tavily_api_key: str | None = None,
+        exa_api_key: str | None = None,
+        max_chars: int = 50000,
+        accept_markdown: bool = False,
+    ):
+        self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
+        self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
+        self.max_chars = max_chars
+        self.accept_markdown = accept_markdown
+
     @property
     def name(self) -> str:
         return "web_fetch"
@@ -310,18 +322,6 @@ class WebFetchTool(Tool):
             },
             "required": ["url"],
         }
-
-    def __init__(
-        self,
-        tavily_api_key: str | None = None,
-        exa_api_key: str | None = None,
-        max_chars: int = 50000,
-        accept_markdown: bool = False,
-    ):
-        self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
-        self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
-        self.max_chars = max_chars
-        self.accept_markdown = accept_markdown
 
     async def execute(  # type: ignore[override]
         self,

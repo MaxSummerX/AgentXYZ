@@ -79,5 +79,5 @@ class ToolRegistry:
         return len(self._tools)
 
     def __contains__(self, name: str) -> bool:
-        """Проверить наличие инструмента по имени."""
+        """Проверить наличие инструмента по имени (оператор `in`)."""
         return name in self._tools

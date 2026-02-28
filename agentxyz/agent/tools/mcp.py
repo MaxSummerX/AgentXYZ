@@ -75,17 +75,19 @@ async def connect_mcp_servers(
             elif cfg.url:
                 from mcp.client.streamable_http import streamable_http_client
 
-                if cfg.headers:
-                    http_client = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=cfg.headers, follow_redirects=True)
+                # Всегда передавайте явный httpx-клиент, чтобы HTTP-транспорт MCP не наследовал
+                # стандартный 5-секундный тайм-аут httpx и не прерывал работу более высокого
+                # уровня из-за истечения времени ожидания инструмента.
+                http_client = await stack.enter_async_context(
+                    httpx.AsyncClient(
+                        headers=cfg.headers or None,
+                        follow_redirects=True,
+                        timeout=None,
                     )
-                    read, write, _ = await stack.enter_async_context(
-                        streamable_http_client(cfg.url, http_client=http_client)
-                    )
-                else:
-                    read, write, _ = await stack.enter_async_context(
-                        streamable_http_client(cfg.url)
-                    )
+                )
+                read, write, _ = await stack.enter_async_context(
+                    streamable_http_client(cfg.url, http_client=http_client)
+                )
             else:
                 logger.warning(
                     "MCP-сервер '{}': не указаны command или url, пропускаем", name
