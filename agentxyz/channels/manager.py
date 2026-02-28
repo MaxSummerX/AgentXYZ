@@ -138,8 +138,8 @@ class ChannelManager:
                     ):
                         continue
 
-                # Обработка gateway сообщений
-                if msg.channel == "gateway" and self._gateway_server:
+                # Обработка gateway/fastapi сообщений
+                if msg.channel in ("gateway", "fastapi") and self._gateway_server:
                     try:
                         await self._gateway_server.receive_from_agent(msg)
                     except Exception as e:

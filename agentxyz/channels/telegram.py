@@ -125,6 +125,7 @@ class TelegramChannel(BaseChannel):
     BOT_COMMANDS: ClassVar[list[BotCommand]] = [
         BotCommand("start", "Запустить бота"),
         BotCommand("new", "Начать новый диалог"),
+        BotCommand("stop", "Прекратить текущую задачу"),
         BotCommand("help", "Показать доступные команды"),
     ]
 
@@ -143,6 +144,8 @@ class TelegramChannel(BaseChannel):
         self._typing_tasks: dict[
             str, asyncio.Task
         ] = {}  # chat_id -> задача цикла печати (typing loop task)
+        self._media_group_buffers: dict[str, dict] = {}
+        self._media_group_tasks: dict[str, asyncio.Task] = {}
         self.transcription_config = transcription_config or TranscriptionConfig()
 
     async def start(self) -> None:
@@ -227,6 +230,11 @@ class TelegramChannel(BaseChannel):
         # Отменить все индикаторы набора текста
         for chat_id in list(self._typing_tasks):
             self._stop_typing(chat_id)
+
+        for task in self._media_group_tasks.values():
+            task.cancel()
+        self._media_group_tasks.clear()
+        self._media_group_buffers.clear()
 
         if self._app:
             logger.info("Остановка бота Telegram...")
@@ -350,6 +358,7 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text(
             "🔥 Команды agentxyz:\n"
             "/new — Начать новый диалог\n"
+            "/stop — Stop the current task\n"
             "/help — Показать доступные команды"
         )
 
@@ -469,6 +478,34 @@ class TelegramChannel(BaseChannel):
 
         str_chat_id = str(chat_id)
 
+        # Группы медиа в Telegram: кратковременная буферизация, пересылка как одного агрегированного сообщения.
+        if media_group_id := getattr(message, "media_group_id", None):
+            key = f"{str_chat_id}:{media_group_id}"
+            if key not in self._media_group_buffers:
+                self._media_group_buffers[key] = {
+                    "sender_id": sender_id,
+                    "chat_id": str_chat_id,
+                    "contents": [],
+                    "media": [],
+                    "metadata": {
+                        "message_id": message.message_id,
+                        "user_id": user.id,
+                        "username": user.username,
+                        "first_name": user.first_name,
+                        "is_group": message.chat.type != "private",
+                    },
+                }
+                self._start_typing(str_chat_id)
+            buf = self._media_group_buffers[key]
+            if content and content != "[empty message]":
+                buf["contents"].append(content)
+            buf["media"].extend(media_paths)
+            if key not in self._media_group_tasks:
+                self._media_group_tasks[key] = asyncio.create_task(
+                    self._flush_media_group(key)
+                )
+            return
+
         # Запустить индикатор набора текста перед обработкой
         self._start_typing(str_chat_id)
 
@@ -486,6 +523,23 @@ class TelegramChannel(BaseChannel):
                 "is_group": message.chat.type != "private",
             },
         )
+
+    async def _flush_media_group(self, key: str) -> None:
+        """Непродолжительная пауза, после которой буферизованная группа медиа пересылается за один шаг"""
+        try:
+            await asyncio.sleep(0.6)
+            if not (buf := self._media_group_buffers.pop(key, None)):
+                return
+            content = "\n".join(buf["contents"]) or "[empty message]"
+            await self._handle_message(
+                sender_id=buf["sender_id"],
+                chat_id=buf["chat_id"],
+                content=content,
+                media=list(dict.fromkeys(buf["media"])),
+                metadata=buf["metadata"],
+            )
+        finally:
+            self._media_group_tasks.pop(key, None)
 
     def _start_typing(self, chat_id: str) -> None:
         """Начать отправку индикатора 'набирает...' для чата."""

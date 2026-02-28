@@ -112,13 +112,6 @@ class EmailChannel(BaseChannel):
             )
             return
 
-        force_send = bool((msg.metadata or {}).get("force_send"))
-        if not self.config.auto_reply_enabled and not force_send:
-            logger.info(
-                "Пропуск автоматического ответа на email: auto_reply_enabled имеет значение false"
-            )
-            return
-
         if not self.config.smtp_host:
             logger.warning("SMTP-хост email канала не настроен")
             return
@@ -126,6 +119,18 @@ class EmailChannel(BaseChannel):
         to_addr = msg.chat_id.strip()
         if not to_addr:
             logger.warning("Отсутствует адрес получателя в email канале")
+            return
+
+        # Определяем, является ли это ответом (получатель ранее отправлял нам письмо)
+        is_reply = to_addr in self._last_subject_by_chat
+        force_send = bool((msg.metadata or {}).get("force_send"))
+
+        # autoReplyEnabled управляет только автоматическими ответами, а не активными отправками
+        if is_reply and not self.config.auto_reply_enabled and not force_send:
+            logger.info(
+                "Пропуск автоматического ответа на email {}: auto_reply_enabled имеет значение false",
+                to_addr,
+            )
             return
 
         base_subject = self._last_subject_by_chat.get(to_addr, "agentxyz reply")
