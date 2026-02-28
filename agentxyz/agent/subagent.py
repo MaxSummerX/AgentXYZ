@@ -59,6 +59,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     async def spawn(
         self,
@@ -66,6 +67,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        session_key: str | None = None,
     ) -> str:
         """
         Запустить субагента для выполнения задачи в фоне.
@@ -75,6 +77,7 @@ class SubagentManager:
             label: Опциональная читаемая метка для задачи.
             origin_channel: Канал для анонсирования результатов.
             origin_chat_id: ID чата для анонсирования результатов.
+            session_key:
 
         Returns:
             Статусное сообщение, указывающее, что субагент был запущен.
@@ -92,9 +95,17 @@ class SubagentManager:
             self._run_subagent(task_id, task, display_label, origin)
         )
         self._running_tasks[task_id] = bg_task
+        if session_key:
+            self._session_tasks.setdefault(session_key, set()).add(task_id)
 
-        # Очистка после завершения
-        bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        def _cleanup(_: asyncio.Task) -> None:
+            self._running_tasks.pop(task_id, None)
+            if session_key and (ids := self._session_tasks.get(session_key)):
+                ids.discard(task_id)
+                if not ids:
+                    del self._session_tasks[session_key]
+
+        bg_task.add_done_callback(_cleanup)
 
         logger.info("Запущен субагент [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
@@ -272,9 +283,6 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
 You are a subagent spawned by the main agent to complete a specific task.
 
-## Your Task
-{task}
-
 ## Rules
 1. Stay focused - complete only the assigned task, nothing else
 2. Your final response will be reported back to the main agent
@@ -297,6 +305,19 @@ Your workspace is at: {self.workspace}
 Skills are available at: {self.workspace}/skills/ (read SKILL.md files as needed)
 
 When you have completed the task, provide a clear summary of your findings or actions."""
+
+    async def cancel_by_session(self, session_key: str) -> int:
+        """Отменить все субагенты для указанной сессии. Возвращает количество отменённых."""
+        tasks = [
+            self._running_tasks[tid]
+            for tid in self._session_tasks.get(session_key, [])
+            if tid in self._running_tasks and not self._running_tasks[tid].done()
+        ]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
 
     def get_running_count(self) -> int:
         """Вернуть количество текущих выполняющихся субагентов."""
