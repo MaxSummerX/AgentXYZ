@@ -1,0 +1,40 @@
+x-common-config: &app-config
+    image: agentxyz-app:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - ./agentxyz-data:/root/.agentxyz
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - agentxyz-network
+
+services:
+  app:
+    <<: *app-config
+    container_name: agentxyz
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    command: ["gateway"]
+    healthcheck:
+      test: [ "CMD", "agentxyz", "status" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  cli:
+    <<: *app-config
+    profiles: [ "cli" ]
+    command: [ "status" ]
+    stdin_open: true
+    tty: true
+
+networks:
+  agentxyz-network:
+    driver: bridge

@@ -65,7 +65,6 @@ packages = ["agentxyz"]
 [tool.hatch.build.targets.wheel.sources]
 "agentxyz" = "agentxyz"
 
-# Include non-Python files in skills
 [tool.hatch.build]
 include = [
     "agentxyz/**/*.py",
