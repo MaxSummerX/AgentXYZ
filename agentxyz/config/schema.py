@@ -115,6 +115,9 @@ class AgentDefaults(Base):
     temperature: float = 0.2
     max_tool_iterations: int = 40
     memory_window: int = 100
+    reasoning_effort: str | None = (
+        None  # low / medium / high — включает режим мышления LLM
+    )
 
 
 class AgentsConfig(Base):
