@@ -43,6 +43,7 @@ class SubagentManager:
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
@@ -55,6 +56,7 @@ class SubagentManager:
         self.model = model or provider.get_default_model()
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
@@ -77,7 +79,7 @@ class SubagentManager:
             label: Опциональная читаемая метка для задачи.
             origin_channel: Канал для анонсирования результатов.
             origin_chat_id: ID чата для анонсирования результатов.
-            session_key:
+            session_key: Ключ сессии для отслеживания связанных задач.
 
         Returns:
             Статусное сообщение, указывающее, что субагент был запущен.
@@ -167,6 +169,7 @@ class SubagentManager:
                     model=self.model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
+                    reasoning_effort=self.reasoning_effort,
                 )
 
                 if response.has_tool_calls:
@@ -270,41 +273,29 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
     def _build_subagent_prompt(self, task: str) -> str:
         """Построить сфокусированный системный промпт для субагента."""
-        import time as _time
-        from datetime import datetime
+        from agentxyz.agent.context import ContextBuilder
+        from agentxyz.agent.skills import SkillsLoader
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
+        time_ctx = ContextBuilder.build_runtime_context(None, None)
+        parts = [
+            f"""# Subagent
 
-        return f"""# Subagent
-
-## Current Time
-{now} ({tz})
+{time_ctx}
 
 You are a subagent spawned by the main agent to complete a specific task.
-
-## Rules
-1. Stay focused - complete only the assigned task, nothing else
-2. Your final response will be reported back to the main agent
-3. Do not initiate conversations or take on side tasks
-4. Be concise but informative in your findings
-
-## What You Can Do
-- Read and write files in the workspace
-- Execute shell commands
-- Search the web and fetch web pages
-- Complete the task thoroughly
-
-## What You Cannot Do
-- Send messages directly to users (no message tool available)
-- Spawn other subagents
-- Access the main agent's conversation history
+Stay focused on the assigned task. Your final response will be reported back to the main agent.
 
 ## Workspace
-Your workspace is at: {self.workspace}
-Skills are available at: {self.workspace}/skills/ (read SKILL.md files as needed)
+{self.workspace}"""
+        ]
 
-When you have completed the task, provide a clear summary of your findings or actions."""
+        skills_summary = SkillsLoader(self.workspace).build_skills_summary()
+        if skills_summary:
+            parts.append(
+                f"## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{skills_summary}"
+            )
+
+        return "\n\n".join(parts)
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Отменить все субагенты для указанной сессии. Возвращает количество отменённых."""
