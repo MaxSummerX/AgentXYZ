@@ -1,6 +1,7 @@
 """Управление сессиями для истории переписки."""
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -119,10 +120,11 @@ class SessionManager:
         if not path.exists():
             legacy_path = self._get_legacy_session_path(key)
             if legacy_path.exists():
-                import shutil
-
-                shutil.move(str(legacy_path), str(path))
-                logger.info("Сессия {} перенесена из устаревшего пути", key)
+                try:
+                    shutil.move(str(legacy_path), str(path))
+                    logger.info("Сессия {} перенесена из устаревшего пути", key)
+                except Exception:
+                    logger.exception("Не удалось перенести сеанс {}", key)
 
         if not path.exists():
             return None
