@@ -192,6 +192,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Отправить запрос на генерацию ответа через LiteLLM
@@ -202,6 +203,7 @@ class LiteLLMProvider(LLMProvider):
             model: Идентификатор модели (зависит от провайдера).
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура семплинга (параметр "креативности" модели. От 0 до 1).
+            reasoning_effort: Уровень усилий на рассуждение для моделей o1 (low/medium/high).
 
         Returns:
             LLMResponse, содержащий контент и/или вызовы инструментов.
@@ -244,6 +246,10 @@ class LiteLLMProvider(LLMProvider):
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
 
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
+
         # Добавляем к словарю запрос вызовы инструментов если есть
         if tools:
             kwargs["tools"] = tools
@@ -276,7 +282,7 @@ class LiteLLMProvider(LLMProvider):
         choice = response.choices[0]
         message = choice.message
 
-        # # Извлекаем текстовый контент ответа
+        # # Извлечь текстовый контент ответа
         # # Некоторые модели (например, Claude thinking mode) возвращают reasoning_content
         # content = message.content
         # if not content and hasattr(message, "reasoning_content"):
@@ -314,6 +320,7 @@ class LiteLLMProvider(LLMProvider):
             }
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
+        thinking_blocks = getattr(message, "thinking_blocks", None) or None
 
         # Формируем и возвращаем итоговый объект LLMResponse
         return LLMResponse(
@@ -322,6 +329,7 @@ class LiteLLMProvider(LLMProvider):
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
             reasoning_content=reasoning_content,
+            thinking_blocks=thinking_blocks,
         )
 
     def get_default_model(self) -> str:

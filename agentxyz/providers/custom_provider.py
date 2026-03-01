@@ -43,6 +43,7 @@ class CustomProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Отправить запрос на OpenAI-совместимый endpoint.
@@ -53,6 +54,7 @@ class CustomProvider(LLMProvider):
             model: Название модели (переопределяет default_model).
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура генерации (0-1).
+            reasoning_effort: Уровень усилий на рассуждение для моделей o1 (low/medium/high).
 
         Returns:
             LLMResponse с контентом и/или вызовами инструментов.
@@ -63,6 +65,8 @@ class CustomProvider(LLMProvider):
             "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if tools:
             kwargs.update(tools=tools, tool_choice="auto")
         try:
