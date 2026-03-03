@@ -65,10 +65,14 @@ class WebSearchTool(Tool):
         exa_api_key: str | None = None,
         tavily_api_key: str | None = None,
         brave_api_key: str | None = None,
+        max_results: int = 5,
+        proxy: str | None = None,
     ):
         self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
         self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
         self.brave_api_key = brave_api_key or os.environ.get("BRAVE_API_KEY", "")
+        self.max_results = max_results
+        self.proxy = proxy
 
     @property
     def name(self) -> str:
@@ -249,11 +253,14 @@ class WebSearchTool(Tool):
             logger.warning("DDGS search failed: {}", e)
             return None
 
-    async def _search_brave(self, query: str, max_results: int) -> str:
+    async def _search_brave(self, query: str, max_results: int, **kwargs: Any) -> str:
 
         try:
-            n = min(max(max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
+            n = min(max(max_results or self.max_results, 1), 10)
+            logger.debug(
+                "WebSearch: {}", "прокси включён" if self.proxy else "прямое соединение"
+            )
+            async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
@@ -265,7 +272,7 @@ class WebSearchTool(Tool):
                 )
                 r.raise_for_status()
 
-            results = r.json().get("web", {}).get("results", [])
+            results = r.json().get("web", {}).get("results", [])[:n]
             if not results:
                 return f"No results for: {query}"
 
@@ -275,7 +282,11 @@ class WebSearchTool(Tool):
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("Ошибка прокси WebSearch: {}", e)
+            return f"Proxy error: {e}"
         except Exception as e:
+            logger.error("Ошибка WebSearch: {}", e)
             return f"Error: {e}"
 
 
@@ -288,11 +299,13 @@ class WebFetchTool(Tool):
         exa_api_key: str | None = None,
         max_chars: int = 50000,
         accept_markdown: bool = False,
+        proxy: str | None = None,
     ):
         self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
         self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
         self.max_chars = max_chars
         self.accept_markdown = accept_markdown
+        self.proxy = proxy
 
     @property
     def name(self) -> str:
@@ -328,6 +341,7 @@ class WebFetchTool(Tool):
         url: str,
         extract_mode: str = "markdown",
         max_chars: int | None = None,
+        proxy: str | None = None,
         accept_markdown: bool | None = None,
         **kwargs: Any,
     ) -> str:
@@ -416,7 +430,6 @@ class WebFetchTool(Tool):
         try:
             exa = Exa(api_key=self.exa_api_key)
 
-            # Exa Contents API
             contents_result = await asyncio.to_thread(
                 exa.get_contents,  # type: ignore[arg-type]
                 urls=[url],
@@ -464,13 +477,27 @@ class WebFetchTool(Tool):
         self, url: str, extract_mode: str, max_chars: int, accept_markdown: bool | None
     ) -> str:
         """Извлечь через Readability (fallback)."""
+        max_chars = max_chars or self.max_chars
+        is_valid, error_msg = _validate_url(url)
+        if not is_valid:
+            return json.dumps(
+                {"error": f"URL validation failed: {error_msg}", "url": url},
+                ensure_ascii=False,
+            )
+
         try:
             headers = {"User-Agent": USER_AGENT}
+            logger.debug(
+                "WebFetch: {}", "прокси включён" if self.proxy else "прямое соединение"
+            )
             if accept_markdown:
                 headers["Accept"] = "text/markdown, text/html, */*"
 
             async with httpx.AsyncClient(
-                follow_redirects=True, max_redirects=MAX_REDIRECTS, timeout=30.0
+                follow_redirects=True,
+                max_redirects=MAX_REDIRECTS,
+                timeout=30.0,
+                proxy=self.proxy,
             ) as client:
                 r = await client.get(url, headers=headers)
                 r.raise_for_status()
@@ -524,9 +551,15 @@ class WebFetchTool(Tool):
                 result["markdown_tokens"] = markdown_tokens
             if content_signal:
                 result["content_signal"] = content_signal
-            return json.dumps(result)
+            return json.dumps(result, ensure_ascii=False)
 
+        except httpx.ProxyError as e:
+            logger.error("Ошибка прокси WebFetch для {}: {}", url, e)
+            return json.dumps(
+                {"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False
+            )
         except Exception as e:
+            logger.error("Ошибка WebFetch для {}: {}", url, e)
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
 
     @staticmethod
