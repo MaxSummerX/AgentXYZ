@@ -42,6 +42,10 @@ class MessageTool(Tool):
         self._sent_in_turn = False
 
     @property
+    def sent_in_turn(self) -> bool:
+        return self._sent_in_turn
+
+    @property
     def name(self) -> str:
         return "message"
 
