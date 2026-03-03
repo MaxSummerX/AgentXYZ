@@ -90,6 +90,12 @@ class LLMProvider(ABC):
                     result.append(clean)
                     continue
 
+            if isinstance(content, dict):
+                clean = dict(msg)
+                clean["content"] = [content]
+                result.append(clean)
+                continue
+
             result.append(msg)
         return result
 

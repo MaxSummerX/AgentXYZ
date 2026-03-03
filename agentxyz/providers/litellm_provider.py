@@ -17,6 +17,7 @@ from agentxyz.providers.registry import find_by_model, find_gateway
 _ALLOWED_MSG_KEYS = frozenset(
     {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
 )
+_ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
 _ALNUM = string.ascii_letters + string.digits
 
 
@@ -174,11 +175,26 @@ class LiteLLMProvider(LLMProvider):
                     return
 
     @staticmethod
-    def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _extra_msg_keys(original_model: str, resolved_model: str) -> frozenset[str]:
+        """Вернуть специфичные для провайдера дополнительные ключи для сохранения в запросах сообщений."""
+        spec = find_by_model(original_model) or find_by_model(resolved_model)
+        if (
+            (spec and spec.name == "anthropic")
+            or "claude" in original_model.lower()
+            or resolved_model.startswith("anthropic/")
+        ):
+            return _ANTHROPIC_EXTRA_KEYS
+        return frozenset()
+
+    @staticmethod
+    def _sanitize_messages(
+        messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()
+    ) -> list[dict[str, Any]]:
         """Удалить нестандартные ключи и убедиться, что сообщения от ассистента имеют ключ content."""
+        allowed = _ALLOWED_MSG_KEYS | extra_keys
         sanitized = []
         for msg in messages:
-            clean = {k: v for k, v in msg.items() if k in _ALLOWED_MSG_KEYS}
+            clean = {k: v for k, v in msg.items() if k in allowed}
             # Строгие провайдеры требуют "content", даже когда assistant содержит только tool_calls
             if clean.get("role") == "assistant" and "content" not in clean:
                 clean["content"] = None
@@ -213,6 +229,7 @@ class LiteLLMProvider(LLMProvider):
         # _resolve_model добавляет префикс провайдера (например, "anthropic/claude-3-5-sonnet")
         # и нормализует имя модели для вызова через LiteLLM
         model = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, model)
 
         # Если провайдер поддерживает prompt caching (Anthropic), добавляем cache_control
         # в системное сообщение и последний tool — это позволяет кэшировать длинный контекст
@@ -226,7 +243,9 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages)),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages), extra_keys=extra_msg_keys
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
