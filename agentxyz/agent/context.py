@@ -26,7 +26,7 @@ class ContextBuilder:
         "USER.md",
         "TOOLS.md",
     ]
-    _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -119,7 +119,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         lines = [f"Current Time: {now} ({tz})"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
-        return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
+        return ContextBuilder.RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
         """Загрузить все загрузочные файлы из рабочего пространства."""
@@ -156,14 +156,21 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         Returns:
             Список сообщений включая системный промпт.
         """
+        runtime_ctx = self.build_runtime_context(channel, chat_id)
+        user_content = self._build_user_content(current_message, media)
+
+        # Объединить контекст выполнения и пользовательское содержимое в одно пользовательское сообщение,
+        # чтобы избежать последовательных сообщений одной роли, которые некоторые провайдеры отклоняют.
+        merged: str | list[dict[str, Any]]
+        if isinstance(user_content, str):
+            merged = f"{runtime_ctx}\n\n{user_content}"
+        else:
+            merged = [{"type": "text", "text": runtime_ctx}, *user_content]
+
         return [
             {"role": "system", "content": self.build_system_prompt(skill_names)},
             *history,
-            {"role": "user", "content": self.build_runtime_context(channel, chat_id)},
-            {
-                "role": "user",
-                "content": self._build_user_content(current_message, media),
-            },
+            {"role": "user", "content": merged},
         ]
 
     @staticmethod
