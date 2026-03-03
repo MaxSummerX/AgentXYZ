@@ -249,6 +249,7 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Обработать тик таймера - выполнить задачи по расписанию."""
+        self._load_store()
         if not self._store:
             return
 
