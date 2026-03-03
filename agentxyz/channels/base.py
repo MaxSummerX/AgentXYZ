@@ -90,16 +90,15 @@ class BaseChannel(ABC):
 
         # Если белый список пуст, разрешаем всем
         if not allow_list:
+            logger.warning("{}: allow_from пустой — весь доступ запрещён", self.name)
+            return False
+        if "*" in allow_list:
             return True
 
         sender_str = str(sender_id)
-        if sender_str in allow_list:
-            return True
-        if "|" in sender_str:
-            for part in sender_str.split("|"):
-                if part and part in allow_list:
-                    return True
-        return False
+        return sender_str in allow_list or any(
+            p in allow_list for p in sender_str.split("|") if p
+        )
 
     async def _handle_message(
         self,

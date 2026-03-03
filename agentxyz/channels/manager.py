@@ -72,6 +72,16 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Email канал недоступен: {}", e)
 
+        self._validate_allow_from()
+
+    def _validate_allow_from(self) -> None:
+        for name, ch in self.channels.items():
+            if getattr(ch.config, "allow_from", None) == []:
+                raise SystemExit(
+                    f'Error: "{name}" has empty allowFrom (denies all). '
+                    f'Set ["*"] to allow everyone, or add specific user IDs.'
+                )
+
     @staticmethod
     async def _start_channel(name: str, channel: BaseChannel) -> None:
         """Запустить канал и логировать любые исключения."""
