@@ -177,6 +177,9 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Конфигурация веб-инструментов."""
 
+    proxy: str | None = (
+        None  # URL прокси-сервера HTTP/SOCKS5, например: "socks5://127.0.0.1:1080"
+    )
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
