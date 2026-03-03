@@ -306,6 +306,7 @@ def gateway(
         memory_window=config.agents.defaults.memory_window,
         reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -317,13 +318,36 @@ def gateway(
     # Установить callback cron (требует агент)
     async def on_cron_job(job: CronJob) -> str | None:
         """Выполнить задачу cron через агента."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
+        from agentxyz.agent.tools.cron import CronTool
+        from agentxyz.agent.tools.message import MessageTool
+
+        reminder_note = (
+            "[Scheduled Task] Timer finished.\n\n"
+            f"Task '{job.name}' has been triggered.\n"
+            f"Scheduled instruction: {job.payload.message}"
         )
-        if job.payload.deliver and job.payload.to:
+
+        # Предотвратить запуск агентом новых заданий cron во время выполнения
+        cron_tool = agent.tools.get("cron")
+        cron_token = None
+        if isinstance(cron_tool, CronTool):
+            cron_token = cron_tool.set_cron_context(True)
+        try:
+            response = await agent.process_direct(
+                reminder_note,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+            )
+        finally:
+            if isinstance(cron_tool, CronTool) and cron_token is not None:
+                cron_tool.reset_cron_context(cron_token)
+
+        message_tool = agent.tools.get("message")
+        if isinstance(message_tool, MessageTool) and message_tool.sent_in_turn:
+            return response
+
+        if job.payload.deliver and job.payload.to and response:
             from agentxyz.bus.events import OutboundMessage
 
             await bus.publish_outbound(
@@ -530,6 +554,7 @@ def agent(
         memory_window=config.agents.defaults.memory_window,
         reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -703,235 +728,6 @@ def channels_status() -> None:
     table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
     console.print(table)
-
-
-# ============================================================================
-# Команды Cron
-# ============================================================================
-
-cron_app = typer.Typer(help="Управление задачами по расписанию")
-app.add_typer(cron_app, name="cron")
-
-
-@cron_app.command("list")
-def cron_list(
-    all: bool = typer.Option(False, "--all", "-a", help="Включая выключенные"),
-) -> None:
-    """Список задач."""
-    from agentxyz.config.loader import get_data_dir
-    from agentxyz.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
-
-    jobs = service.list_jobs(include_disabled=all)
-
-    if not jobs:
-        console.print("Нет задач по расписанию.")
-        return
-
-    table = Table(title="Scheduled Jobs")
-    table.add_column("ID", style="cyan")
-    table.add_column("Name")
-    table.add_column("Schedule")
-    table.add_column("Status")
-    table.add_column("Next Run")
-
-    import time
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-
-    for job in jobs:
-        # Форматирование расписания
-        if job.schedule.kind == "every":
-            sched = f"every {(job.schedule.every_ms or 0) // 1000}s"
-        elif job.schedule.kind == "cron":
-            sched = (
-                f"{job.schedule.expr or ''} ({job.schedule.tz})"
-                if job.schedule.tz
-                else (job.schedule.expr or "")
-            )
-        else:
-            sched = "one-time"
-
-        # Форматирование следующего запуска
-        next_run = ""
-        if job.state.next_run_at_ms:
-            ts = job.state.next_run_at_ms / 1000
-            try:
-                tz = ZoneInfo(str(job.schedule.tz)) if job.schedule.tz else None
-                next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-
-        status = "[green]активен[/green]" if job.enabled else "[dim]отключён[/dim]"
-
-        table.add_row(job.id, job.name, sched, status, next_run)
-
-    console.print(table)
-
-
-@cron_app.command("add")
-def cron_add(
-    name: str = typer.Option(..., "--name", "-n", help="Имя задачи"),
-    message: str = typer.Option(..., "--message", "-m", help="Сообщение боту"),
-    every: int = typer.Option(None, "--every", "-e", help="Период: каждые N секунд"),
-    cron_expr: str = typer.Option(
-        None, "--cron", "-c", help="Выражение cron (например '0 9 * * *')"
-    ),
-    tz: str | None = typer.Option(
-        None, "--tz", help="Часовой пояс IANA для cron (например, 'Europe/Moscow')"
-    ),
-    at: str = typer.Option(None, "--at", help="Выполнить однажды (ISO формат)"),
-    deliver: bool = typer.Option(False, "--deliver", "-d", help="Отправить ответ"),
-    to: str = typer.Option(None, "--to", help="Кому"),
-    channel: str = typer.Option(
-        None, "--channel", help="Через канал (например 'telegram')"
-    ),
-) -> None:
-    """Добавить задачу."""
-    from agentxyz.config.loader import get_data_dir
-    from agentxyz.cron.service import CronService
-    from agentxyz.cron.types import CronSchedule
-
-    if tz and not cron_expr:
-        console.print("[red]Ошибка: --tz можно использовать только с --cron[/red]")
-        raise typer.Exit(1)
-
-    # Определить тип расписания
-    if every:
-        schedule = CronSchedule(kind="every", every_ms=every * 1000)
-    elif cron_expr:
-        schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
-    elif at:
-        import datetime
-
-        dt = datetime.datetime.fromisoformat(at)
-        schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
-    else:
-        console.print("[red]Ошибка: укажите --every, --cron или --at[/red]")
-        raise typer.Exit(1)
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
-
-    try:
-        job = service.add_job(
-            name=name,
-            schedule=schedule,
-            message=message,
-            deliver=deliver,
-            to=to,
-            channel=channel,
-        )
-    except ValueError as e:
-        console.print(f"[red]Ошибка: {e}[/red]")
-        raise typer.Exit(1) from e
-
-    console.print(f"[green]✓[/green] Задача добавлена: '{job.name}' ({job.id})")
-
-
-@cron_app.command("remove")
-def cron_remove(
-    job_id: str = typer.Argument(..., help="ID задачи для удаления"),
-) -> None:
-    """Удалить задачу."""
-    from agentxyz.config.loader import get_data_dir
-    from agentxyz.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
-
-    if service.remove_job(job_id):
-        console.print(f"[green]✓[/green] Задача удалена: {job_id}")
-    else:
-        console.print(f"[red]Задача {job_id} не найдена[/red]")
-
-
-@cron_app.command("enable")
-def cron_enable(
-    job_id: str = typer.Argument(..., help="ID задачи"),
-    disable: bool = typer.Option(False, "--disable", help="Отключить вместо включить"),
-) -> None:
-    """Переключить задачу."""
-    from agentxyz.config.loader import get_data_dir
-    from agentxyz.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
-
-    job = service.enable_job(job_id, enabled=not disable)
-    if job:
-        status = "disabled" if disable else "enabled"
-        console.print(f"[green]✓[/green] Задача '{job.name}' {status}")
-    else:
-        console.print(f"[red]Задача {job_id} не найдена[/red]")
-
-
-@cron_app.command("run")
-def cron_run(
-    job_id: str = typer.Argument(..., help="ID задачи для запуска"),
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Запустить даже если отключено"
-    ),
-) -> None:
-    """Выполнить сейчас."""
-    from loguru import logger
-
-    from agentxyz.agent.loop import AgentLoop
-    from agentxyz.bus.queue import MessageBus
-    from agentxyz.config.loader import get_data_dir, load_config
-    from agentxyz.cron.service import CronService
-    from agentxyz.cron.types import CronJob
-
-    logger.disable("agentxyz")
-
-    config = load_config()
-    provider = _make_provider(config)
-    bus = MessageBus()
-    agent_loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-    )
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
-
-    result_holder = []
-
-    async def on_job(job: CronJob) -> str | None:
-        response = await agent_loop.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        result_holder.append(response)
-        return response
-
-    service.on_job = on_job
-
-    async def run() -> bool:
-        return await service.run_job(job_id, force=force)
-
-    if asyncio.run(run()):
-        console.print("[green]✓[/green] Задача завершена")
-        if result_holder:
-            _print_agent_response(result_holder[0], render_markdown=True)
-    else:
-        console.print(f"[red]Ошибка выполнения: {job_id}[/red]")
 
 
 # ============================================================================
