@@ -1,5 +1,6 @@
 """Инструмент cron для планирования напоминаний и задач."""
 
+from contextvars import ContextVar, Token
 from typing import Any
 
 from agentxyz.agent.tools.base import Tool
@@ -14,11 +15,22 @@ class CronTool(Tool):
         self._cron = cron_service
         self._channel = ""
         self._chat_id = ""
+        self._in_cron_context: ContextVar[bool] = ContextVar(
+            "cron_in_context", default=False
+        )
 
     def set_context(self, channel: str, chat_id: str) -> None:
         """Установить контекст текущей сессии для доставки."""
         self._channel = channel
         self._chat_id = chat_id
+
+    def set_cron_context(self, active: bool) -> Token[bool]:
+        """Отметить, выполняется ли инструмент внутри обратного вызова задания cron."""
+        return self._in_cron_context.set(active)
+
+    def reset_cron_context(self, token: Token[bool]) -> None:
+        """Восстановить предыдущий контекст cron."""
+        self._in_cron_context.reset(token)
 
     @property
     def name(self) -> str:
@@ -58,10 +70,7 @@ class CronTool(Tool):
                     "type": "string",
                     "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
                 },
-                "job_id": {
-                    "type": "string",
-                    "description": "Job ID (for remove)",
-                },
+                "job_id": {"type": "string", "description": "Job ID (for remove)"},
             },
             "required": ["action"],
         }
@@ -78,6 +87,10 @@ class CronTool(Tool):
         **kwargs: Any,
     ) -> str:
         if action == "add":
+            if self._in_cron_context.get():
+                return (
+                    "Error: cannot schedule new jobs from within a cron job execution"
+                )
             return self._add_job(message, every_seconds, cron_expr, tz, at)
         elif action == "list":
             return self._list_jobs()
