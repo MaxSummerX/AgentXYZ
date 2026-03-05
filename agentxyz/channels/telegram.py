@@ -425,7 +425,17 @@ class TelegramChannel(BaseChannel):
         # Скачать медиа если есть
         if media_file and self._app:
             try:
+                logger.error(
+                    "🔴 [DEBUG] Начало загрузки медиа: type={}, file_id={}",
+                    media_type,
+                    media_file.file_id[:20],
+                )
                 file = await self._app.bot.get_file(media_file.file_id)
+                logger.error(
+                    "🔴 [DEBUG] Получен file объект: path={}, size={}",
+                    getattr(file, "file_path", "N/A"),
+                    getattr(file, "file_size", "N/A"),
+                )
                 ext = self._get_extension(
                     media_type or "", getattr(media_file, "mime_type", None)
                 )
@@ -437,7 +447,14 @@ class TelegramChannel(BaseChannel):
                 media_dir.mkdir(parents=True, exist_ok=True)
 
                 file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
+                logger.debug("Скачивание в {}...", file_path)
                 await file.download_to_drive(str(file_path))
+                logger.error(
+                    "[DEBUG] Успешно загружен {} в {} (размер: {} bytes)",
+                    media_type,
+                    file_path,
+                    file_path.stat().st_size if file_path.exists() else "N/A",
+                )
 
                 media_paths.append(str(file_path))
 
@@ -469,7 +486,16 @@ class TelegramChannel(BaseChannel):
 
                 logger.debug("Загружен {} в {}", media_type, file_path)
             except Exception as e:
-                logger.error("Ошибка загрузки медиа: {}", e)
+                import traceback
+
+                logger.error(
+                    "[DEBUG] Ошибка загрузки медиа: type={}, file_id={}, error={}, traceback={}",
+                    media_type,
+                    getattr(media_file, "file_id", "N/A")[:20],
+                    str(e),
+                    traceback.format_exc()[-500:],
+                )
+
                 content_parts.append(f"[{media_type}: загрузка неудачна]")
 
         content = "\n".join(content_parts) if content_parts else "[пустое сообщение]"
