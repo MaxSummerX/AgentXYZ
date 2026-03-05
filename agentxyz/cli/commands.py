@@ -264,13 +264,19 @@ def _make_provider(
 @app.command()
 def gateway(
     port: int = typer.Option(8888, "--port", "-p", help="Порт Gateway"),
+    workspace: str | None = typer.Option(
+        None, "--workspace", "-w", help="Рабочий каталог"
+    ),
+    config_file: str | None = typer.Option(
+        None, "--config", "-c", help="Путь к файлу конфигурации"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Подробный лог"),
 ) -> None:
     """Запустить agentxyz с веб-интерфейсом (Gateway)."""
     from agentxyz.agent.loop import AgentLoop
     from agentxyz.bus.queue import MessageBus
     from agentxyz.channels.manager import ChannelManager
-    from agentxyz.config.loader import get_data_dir, load_config
+    from agentxyz.config.loader import load_config
     from agentxyz.cron.service import CronService
     from agentxyz.cron.types import CronJob
     from agentxyz.gateway.server import GatewayServer
@@ -282,16 +288,20 @@ def gateway(
 
         logging.basicConfig(level=logging.DEBUG)
 
-    console.print(f"{__logo__} Запуск agentxyz Gateway на порту {port}...")
+    config_path = Path(config_file) if config_file else None
+    config = load_config(config_path)
 
-    config = load_config()
+    if workspace:
+        config.agents.defaults.workspace = workspace
+    console.print(f"{__logo__} Запуск agentxyz Gateway на порту {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
 
     # Создать сервис cron первым (callback устанавливается после создания агента)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    # Используем путь workspace для хранилища cron каждого экземпляра
+    cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
     # Инициализировать агент и сервис cron
@@ -604,12 +614,18 @@ def agent(
         else:
             cli_channel, cli_chat_id = "cli", session_id
 
-        def _exit_on_sigint(signum: int, frame: object) -> None:
+        def _handle_signal(signum: int, frame: object) -> None:
+            sig_name = signal.Signals(signum).name
             _restore_terminal()
-            console.print("\nДо свидания!")
-            os._exit(0)
 
-        signal.signal(signal.SIGINT, _exit_on_sigint)
+            console.print(f"\nПолучен сигнал {sig_name}, до свидания!")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGHUP, _handle_signal)
+        # Игнорируем SIGPIPE, чтобы предотвратить тихое завершение процесса при записи в закрытые каналы
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive() -> None:
             bus_task = asyncio.create_task(agent_loop.run())
