@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, cast
 
 import json_repair
@@ -34,7 +35,12 @@ class CustomProvider(LLMProvider):
         """
         super().__init__(api_key, api_base)
         self.default_model = default_model
-        self._client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        # Удерживать affinity стабильным для этого экземпляра провайдера для улучшения локальности кэша бэкенда.
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=api_base,
+            default_headers={"x-session-affinity": uuid.uuid4().hex},
+        )
 
     async def chat(
         self,
