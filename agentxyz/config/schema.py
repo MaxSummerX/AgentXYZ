@@ -193,13 +193,19 @@ class ExecToolConfig(Base):
 class MCPServerConfig(Base):
     """Конфигурация подключения MCP-сервера (stdio или HTTP)."""
 
+    type: Literal["stdio", "sse", "streamableHttp"] | None = (
+        None  # определяется автоматически, если опущено
+    )
     command: str = ""  # Stdio: команда для запуска (например, "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: аргументы команды
     env: dict[str, str] = Field(
         default_factory=dict
     )  # Stdio: дополнительные переменные окружения
-    url: str = ""  # HTTP: URL streaming-HTTP endpoint'а
-    tool_timeout: int = 30  # Таймаут в секундах до отмены вызова инструмента
+    url: str = ""  # HTTP/SSE: URL-адрес конечной точки
+    headers: dict[str, str] = Field(
+        default_factory=dict
+    )  # HTTP/SSE: пользовательские заголовки
+    tool_timeout: int = 30  # секунд до отмены вызова инструмента
 
 
 class ToolsConfig(Base):
