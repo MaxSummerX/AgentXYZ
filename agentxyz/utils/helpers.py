@@ -5,6 +5,19 @@ from datetime import datetime
 from pathlib import Path
 
 
+def detect_image_mime(data: bytes) -> str | None:
+    """Определяет MIME-тип изображения по magic bytes, игнорируя расширение файла."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def ensure_dir(path: Path) -> Path:
     """Гарантирует существование директории, создаёт при необходимости."""
     path.mkdir(parents=True, exist_ok=True)
@@ -46,6 +59,38 @@ def safe_filename(name: str) -> str:
     """Преобразует строку в безопасное имя файла."""
     # Замена небезопасных символов
     return _UNSAFE_CHARS.sub("_", name).strip()
+
+
+def split_message(content: str, max_len: int = 2000) -> list[str]:
+    """
+    Разбивает контент на части не длиннее max_len, предпочитая разрывы строк.
+
+    Args:
+      content: Текстовый контент для разбивки.
+      max_len: Максимальная длина каждой части (по умолчанию 2000 для совместимости с Discord).
+
+    Returns:
+      Список частей сообщения, каждая в пределах max_len.
+    """
+    if not content:
+        return []
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        # Сначала пробуем разрыв на новой строке, затем на пробеле, затем жёсткий разрыв
+        pos = cut.rfind("\n")
+        if pos <= 0:
+            pos = cut.rfind(" ")
+        if pos <= 0:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
