@@ -141,6 +141,15 @@ class MemoryStore:
             # Некоторые провайдеры возвращают аргументы как JSON-строку вместо словаря
             if isinstance(args, str):
                 args = json.loads(args)
+            # Некоторые провайдеры возвращают аргументы как список (обрабатываем edge case)
+            if isinstance(args, list):
+                if args and isinstance(args[0], dict):
+                    args = args[0]
+                else:
+                    logger.warning(
+                        "Консолидация памяти: неожиданные аргументы как пустой или недиктовый список"
+                    )
+                    return False
             if not isinstance(args, dict):
                 logger.warning(
                     "Консолидация памяти: неожиданный тип аргументов {}",
