@@ -8,6 +8,7 @@ from typing import Any
 import json_repair
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from agentxyz.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from agentxyz.providers.registry import find_by_model, find_gateway
@@ -300,34 +301,43 @@ class LiteLLMProvider(LLMProvider):
         # Получаем первый (и единственный) выбор из ответа модели
         choice = response.choices[0]
         message = choice.message
+        content = message.content
+        finish_reason = choice.finish_reason
 
-        # # Извлечь текстовый контент ответа
-        # # Некоторые модели (например, Claude thinking mode) возвращают reasoning_content
-        # content = message.content
-        # if not content and hasattr(message, "reasoning_content"):
-        #     content = message.reasoning_content
+        # Некоторые провайдеры разделяют content и tool_calls
+        # на несколько вариантов. Объединяем их, чтобы tool_calls не потерялись.
+        raw_tool_calls = []
+        for ch in response.choices:
+            msg = ch.message
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                raw_tool_calls.extend(msg.tool_calls)
+                if ch.finish_reason in ("tool_calls", "stop"):
+                    finish_reason = ch.finish_reason
+            if not content and msg.content:
+                content = msg.content
+
+        if len(response.choices) > 1:
+            logger.debug(
+                "LiteLLM response has {} choices, merged {} tool_calls",
+                len(response.choices),
+                len(raw_tool_calls),
+            )
 
         # Обрабатываем вызовы инструментов (tool calls), если они есть
         tool_calls = []
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            for tool_call in message.tool_calls:
-                # Аргументы приходят как JSON-строка, парсим в dict
-                args = tool_call.function.arguments
-                if isinstance(args, str):
-                    args = json_repair.loads(args)
-                    if not isinstance(args, dict):
-                        raise ValueError(
-                            f"Tool call arguments must be a dict, got {type(args).__name__}: {args!r}"
-                        )
+        for tool_call in raw_tool_calls:
+            # Парсим аргументы из JSON-строки при необходимости
+            args = tool_call.function.arguments
+            if isinstance(args, str):
+                args = json_repair.loads(args)
 
-                # Создаём объект ToolCallRequest для каждого вызова и добавляем в список
-                tool_calls.append(
-                    ToolCallRequest(
-                        id=_short_tool_id(),
-                        name=tool_call.function.name,
-                        arguments=args,
-                    )
+            tool_calls.append(
+                ToolCallRequest(
+                    id=_short_tool_id(),
+                    name=tool_call.function.name,
+                    arguments=args,
                 )
+            )
 
         # Собираем статистику использования токенов, если она есть в ответе
         usage = {}
@@ -343,9 +353,9 @@ class LiteLLMProvider(LLMProvider):
 
         # Формируем и возвращаем итоговый объект LLMResponse
         return LLMResponse(
-            content=message.content,
+            content=content,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
+            finish_reason=finish_reason or "stop",
             usage=usage,
             reasoning_content=reasoning_content,
             thinking_blocks=thinking_blocks,
