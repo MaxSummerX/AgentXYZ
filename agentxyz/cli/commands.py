@@ -9,6 +9,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
+# Force UTF-8 encoding for Windows console
+if sys.platform == "win32":
+    if sys.stdout.encoding != "utf-8":
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        # Re-open stdout/stderr with UTF-8 encoding
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 if TYPE_CHECKING:
     from agentxyz.providers.litellm_provider import LiteLLMProvider
 
@@ -224,21 +235,21 @@ def _make_provider(
     config: Config,
 ) -> LiteLLMProvider | CustomProvider:
     """Создать LiteLLMProvider из конфигурации. Завершает работу, если API-ключ не найден."""
-    from agentxyz.providers.custom_provider import CustomProvider
-    from agentxyz.providers.litellm_provider import LiteLLMProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # Custom: прямой OpenAI-совместимый эндпоинт, в обход LiteLLM
+    from agentxyz.providers.custom_provider import CustomProvider
+
     if provider_name == "custom":
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
         )
-
+    from agentxyz.providers.litellm_provider import LiteLLMProvider
     from agentxyz.providers.registry import find_by_name
 
     spec = find_by_name(provider_name or "")
@@ -623,9 +634,13 @@ def agent(
 
         signal.signal(signal.SIGINT, _handle_signal)
         signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGHUP, _handle_signal)
+        # SIGHUP недоступен на Windows
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _handle_signal)
         # Игнорируем SIGPIPE, чтобы предотвратить тихое завершение процесса при записи в закрытые каналы
-        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        # SIGPIPE недоступен на Windows
+        if hasattr(signal, "SIGPIPE"):
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive() -> None:
             bus_task = asyncio.create_task(agent_loop.run())
