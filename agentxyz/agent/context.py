@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 
 from agentxyz.agent.memory import MemoryStore
 from agentxyz.agent.skills import SkillsLoader
+from agentxyz.utils.helpers import detect_image_mime
 
 
 class ContextBuilder:
@@ -25,6 +26,7 @@ class ContextBuilder:
         "SOUL.md",
         "USER.md",
         "TOOLS.md",
+        "IDENTITY.md",
     ]
     RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
@@ -184,10 +186,14 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         images = []
         for path in media:
             p = Path(path)
-            mime, _ = mimetypes.guess_type(path)
-            if not p.is_file() or not mime or not mime.startswith("image/"):
+            if not p.is_file():
                 continue
-            b64 = base64.b64encode(p.read_bytes()).decode()
+            raw = p.read_bytes()
+            # Определяем реальный MIME-тип по magic bytes; fallback на определение по имени файла
+            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            if not mime or not mime.startswith("image/"):
+                continue
+            b64 = base64.b64encode(raw).decode()
             images.append(
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
             )
