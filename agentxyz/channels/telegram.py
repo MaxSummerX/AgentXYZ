@@ -29,11 +29,11 @@ if TYPE_CHECKING:
     from agentxyz.bus.queue import MessageBus
     from agentxyz.config.schema import TelegramConfig
 
-TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
+TELEGRAM_MAX_MESSAGE_LEN = 4000  # Лимит символов сообщения Telegram
 
 
 def _strip_md(s: str) -> str:
-    """Strip markdown inline formatting from text."""
+    """Удалить встроенное форматирование markdown из текста."""
     s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
     s = re.sub(r"__(.+?)__", r"\1", s)
     s = re.sub(r"~~(.+?)~~", r"\1", s)
@@ -42,7 +42,7 @@ def _strip_md(s: str) -> str:
 
 
 def _render_table_box(table_lines: list[str]) -> str:
-    """Convert markdown pipe-table to compact aligned text for <pre> display."""
+    """Конвертировать markdown таблицу в выровненный текст для отображения в <pre>."""
 
     def dw(s: str) -> int:
         return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
@@ -91,7 +91,7 @@ def _markdown_to_telegram_html(text: str) -> str:
 
     text = re.sub(r"```[\w]*\n?([\s\S]*?)```", save_code_block, text)
 
-    # 1.5. Convert markdown tables to box-drawing (reuse code_block placeholders)
+    # 1.5. Конвертировать markdown таблицы в box-drawing (переиспользуя плейсхолдеры code_block)
     lines = text.split("\n")
     rebuilt: list[str] = []
     li = 0
@@ -321,7 +321,7 @@ class TelegramChannel(BaseChannel):
             # chat_id должен быть числовым ID чата Telegram (integer)
             chat_id = int(msg.chat_id)
         except ValueError:
-            logger.error("Invalid chat_id: {}", msg.chat_id)
+            logger.error("Неверный chat_id: {}", msg.chat_id)
             return
 
         reply_params = None
@@ -358,10 +358,10 @@ class TelegramChannel(BaseChannel):
 
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
-                logger.error("Failed to send media {}: {}", media_path, e)
+                logger.error("Не удалось отправить медиа {}: {}", media_path, e)
                 await self._app.bot.send_message(
                     chat_id=chat_id,
-                    text=f"[Failed to send: {filename}]",
+                    text=f"[Не удалось отправить: {filename}]",
                     reply_parameters=reply_params,
                 )
 
@@ -370,7 +370,7 @@ class TelegramChannel(BaseChannel):
             is_progress = msg.metadata.get("_progress", False)
 
             for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
-                # Final response: simulate streaming via draft, then persist
+                # Финальный ответ: имитируем потоковую отправку через draft, затем сохраняем
                 if not is_progress:
                     await self._send_with_streaming(chat_id, chunk, reply_params)
                 else:
@@ -379,7 +379,7 @@ class TelegramChannel(BaseChannel):
     async def _send_text(
         self, chat_id: int, text: str, reply_params: ReplyParameters | None = None
     ) -> None:
-        """Send a plain text message with HTML fallback."""
+        """Отправить текстовое сообщение с fallback на обычный текст при ошибке HTML."""
         if not self._app or not self._app.bot:
             return
         try:
@@ -391,7 +391,9 @@ class TelegramChannel(BaseChannel):
                 reply_parameters=reply_params,
             )
         except Exception as e:
-            logger.warning("HTML parse failed, falling back to plain text: {}", e)
+            logger.warning(
+                "Ошибка парсинга HTML, переключаемся на обычный текст: {}", e
+            )
             try:
                 if not self._app or not self._app.bot:
                     return
@@ -401,12 +403,12 @@ class TelegramChannel(BaseChannel):
                     reply_parameters=reply_params,
                 )
             except Exception as e2:
-                logger.error("Error sending Telegram message: {}", e2)
+                logger.error("Ошибка отправки сообщения в Telegram: {}", e2)
 
     async def _send_with_streaming(
         self, chat_id: int, text: str, reply_params: ReplyParameters | None = None
     ) -> None:
-        """Simulate streaming via send_message_draft, then persist with send_message."""
+        """Имитировать потоковую отправку через send_message_draft, затем сохранить через send_message."""
         if not self._app or not self._app.bot:
             return
         draft_id = int(time.time() * 1000) % (2**31)
@@ -448,13 +450,13 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     async def _on_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /help command, bypassing ACL so all users can access it."""
+        """Обработать команду /help, обходя ACL, чтобы все пользователи могли получить помощь."""
         if not update.message:
             return
         await update.message.reply_text(
             "🔥 Команды agentxyz:\n"
             "/new — Начать новый диалог\n"
-            "/stop — Stop the current task\n"
+            "/stop — Остановить текущую задачу\n"
             "/help — Показать доступные команды"
         )
 
@@ -651,7 +653,8 @@ class TelegramChannel(BaseChannel):
                 metadata=buf["metadata"],
             )
         finally:
-            self._media_group_tasks.pop(key, None)
+            if task := self._media_group_tasks.pop(key, None):
+                await task
 
     def _start_typing(self, chat_id: str) -> None:
         """Начать отправку индикатора 'набирает...' для чата."""
@@ -681,7 +684,7 @@ class TelegramChannel(BaseChannel):
     @staticmethod
     async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Логировать polling и ошибки обработчика вместо их тихого игнорирования."""
-        logger.error("Telegram error: {}", context.error)
+        logger.error("Ошибка Telegram: {}", context.error)
 
     @staticmethod
     def _get_extension(media_type: str, mime_type: str | None) -> str:
