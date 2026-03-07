@@ -5,7 +5,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 
 class Tool(ABC):
@@ -56,6 +56,88 @@ class Tool(ABC):
         """
         pass
 
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Применить безопасные приведения типов на основе схемы перед валидацией."""
+        schema = self.parameters or {}
+        if schema.get("type", "object") != "object":
+            return params
+
+        return cast("dict[str, Any]", self._cast_object(params, schema))
+
+    def _cast_object(self, obj: Any, schema: dict[str, Any]) -> Any:
+        """Привести объект (dict) в соответствии со схемой."""
+        if not isinstance(obj, dict):
+            return obj
+
+        props = schema.get("properties", {})
+        result = {}
+
+        for key, value in obj.items():
+            if key in props:
+                result[key] = self._cast_value(value, props[key])
+            else:
+                result[key] = value
+
+        return result
+
+    def _cast_value(self, val: Any, schema: dict[str, Any]) -> Any:
+        """Привести одиночное значение в соответствии со схемой."""
+        target_type = schema.get("type")
+
+        if target_type == "boolean" and isinstance(val, bool):
+            return val
+        if (
+            target_type == "integer"
+            and isinstance(val, int)
+            and not isinstance(val, bool)
+        ):
+            return val
+        if target_type in self._TYPE_MAP and target_type not in (
+            "boolean",
+            "integer",
+            "array",
+            "object",
+        ):
+            expected = self._TYPE_MAP[target_type]
+            if isinstance(val, expected):
+                return val
+
+        if target_type == "integer" and isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return val
+
+        if target_type == "number" and isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError:
+                return val
+
+        if target_type == "string":
+            return val if val is None else str(val)
+
+        if target_type == "boolean" and isinstance(val, str):
+            val_lower = val.lower()
+            if val_lower in ("true", "1", "yes"):
+                return True
+            if val_lower in ("false", "0", "no"):
+                return False
+            return val
+
+        if target_type == "array" and isinstance(val, list):
+            item_schema = schema.get("items")
+            return (
+                [self._cast_value(item, item_schema) for item in val]
+                if item_schema
+                else val
+            )
+
+        if target_type == "object" and isinstance(val, dict):
+            return self._cast_object(val, schema)
+
+        return val
+
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         """Проверить параметры инструмента по JSON-схеме. Возвращает список ошибок (пустой если валидно)."""
         if not isinstance(params, dict):
@@ -74,7 +156,17 @@ class Tool(ABC):
         """
 
         t, label = schema.get("type"), path or "parameter"
-        if t in self._TYPE_MAP and not isinstance(val, self._TYPE_MAP[t]):
+        if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
+            return [f"{label} should be integer"]
+        if t == "number" and (
+            not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)
+        ):
+            return [f"{label} should be number"]
+        if (
+            t in self._TYPE_MAP
+            and t not in ("integer", "number")
+            and not isinstance(val, self._TYPE_MAP[t])
+        ):
             return [f"{label} should be {t}"]
 
         errors = []
