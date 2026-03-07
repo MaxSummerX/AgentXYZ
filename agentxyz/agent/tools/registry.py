@@ -55,6 +55,9 @@ class ToolRegistry:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
         try:
+            # Попытка привести параметры в соответствие с типами схемы
+            params = tool.cast_params(params)
+            # Валидация параметров
             errors = tool.validate_params(params)
             if errors:
                 return (
