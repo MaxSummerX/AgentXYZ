@@ -86,9 +86,11 @@ class WhisperTranscriptionProvider(TranscriptionProvider):
             model = self._get_model()
 
             def _transcribe() -> tuple[str, TranscriptionInfo]:
-                segs, info = model.transcribe(str(path), language=self.language)
-                text = " ".join(s.text.strip() for s in segs)
-                return text, info
+                segment, information = model.transcribe(
+                    str(path), language=self.language
+                )
+                text = " ".join(s.text.strip() for s in segment)
+                return text, information
 
             full_text, info = await asyncio.to_thread(_transcribe)
             logger.info(
