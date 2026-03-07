@@ -99,6 +99,20 @@ class LLMProvider(ABC):
             result.append(msg)
         return result
 
+    @staticmethod
+    def _sanitize_request_messages(
+        messages: list[dict[str, Any]],
+        allowed_keys: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        """Сохранять только безопасные для провайдера ключи сообщений и нормализовать контент ассистента."""
+        sanitized = []
+        for msg in messages:
+            clean = {k: v for k, v in msg.items() if k in allowed_keys}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized
+
     @abstractmethod
     async def chat(
         self,
@@ -118,6 +132,7 @@ class LLMProvider(ABC):
             model: Идентификатор модели (зависит от провайдера).
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура семплинга (параметр "креативности" модели. От 0 до 1).
+            reasoning_effort: Уровень усилий моделирования для моделей с расширенным рассуждением (o1, o3, DeepSeek-R1). Например: "low", "medium", "high".
 
         Returns:
             LLMResponse, содержащий контент и/или вызовы инструментов.
