@@ -95,15 +95,15 @@ class CustomProvider(LLMProvider):
         msg = choice.message
         tool_calls = [
             ToolCallRequest(
-                id=tc.id,
-                name=tc.function.name,
+                id=tool_call.id,
+                name=tool_call.function.name,
                 arguments=cast(
-                    "dict[str, Any]", json_repair.loads(tc.function.arguments)
+                    "dict[str, Any]", json_repair.loads(tool_call.function.arguments)
                 )
-                if isinstance(tc.function.arguments, str)
-                else tc.function.arguments or {},
+                if isinstance(tool_call.function.arguments, str)
+                else tool_call.function.arguments or {},
             )
-            for tc in (msg.tool_calls or [])
+            for tool_call in (msg.tool_calls or [])
         ]
         u = response.usage
         return LLMResponse(
