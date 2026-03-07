@@ -1,5 +1,6 @@
 """Реализация провайдера LiteLLM для поддержки множества провайдеров"""
 
+import hashlib
 import os
 import secrets
 import string
@@ -188,18 +189,46 @@ class LiteLLMProvider(LLMProvider):
         return frozenset()
 
     @staticmethod
+    def _normalize_tool_call_id(tool_call_id: Any) -> Any:
+        """Нормализовать tool_call_id в безопасную для провайдера буквенно-цифровую форму из 9 символов."""
+        if not isinstance(tool_call_id, str):
+            return tool_call_id
+        if len(tool_call_id) == 9 and tool_call_id.isalnum():
+            return tool_call_id
+        return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
+
+    @staticmethod
     def _sanitize_messages(
         messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()
     ) -> list[dict[str, Any]]:
-        """Удалить нестандартные ключи и убедиться, что сообщения от ассистента имеют ключ content."""
+        """Удалить нестандартные ключи и убедиться, что сообщения ассистента имеют ключ content."""
         allowed = _ALLOWED_MSG_KEYS | extra_keys
-        sanitized = []
-        for msg in messages:
-            clean = {k: v for k, v in msg.items() if k in allowed}
-            # Строгие провайдеры требуют "content", даже когда assistant содержит только tool_calls
-            if clean.get("role") == "assistant" and "content" not in clean:
-                clean["content"] = None
-            sanitized.append(clean)
+        sanitized = LLMProvider._sanitize_request_messages(messages, allowed)
+        id_map: dict[str, str] = {}
+
+        def map_id(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+            return id_map.setdefault(
+                value, LiteLLMProvider._normalize_tool_call_id(value)
+            )
+
+        for clean in sanitized:
+            # Синхронизировать tool_calls[].id ассистента и tool_call_id инструмента после
+            # сокращения, иначе строгие провайдеры отклоняют нарушенную связь.
+            if isinstance(clean.get("tool_calls"), list):
+                normalized_tool_calls = []
+                for tc in clean["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        normalized_tool_calls.append(tc)
+                        continue
+                    tc_clean = dict(tc)
+                    tc_clean["id"] = map_id(tc_clean.get("id"))
+                    normalized_tool_calls.append(tc_clean)
+                clean["tool_calls"] = normalized_tool_calls
+
+            if clean.get("tool_call_id"):
+                clean["tool_call_id"] = map_id(clean["tool_call_id"])
         return sanitized
 
     async def chat(
