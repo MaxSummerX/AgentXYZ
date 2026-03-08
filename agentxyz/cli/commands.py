@@ -34,6 +34,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agentxyz import __logo__, __version__
+from agentxyz.config.paths import get_workspace_path
 from agentxyz.config.schema import Config
 from agentxyz.providers import CustomProvider, LiteLLMProvider
 from agentxyz.utils.helpers import sync_workspace_templates
@@ -109,7 +110,9 @@ def _init_prompt_session() -> None:
     except Exception:
         pass
 
-    history_file = Path.home() / ".agentxyz" / "history" / "cli_history"
+    from agentxyz.config.paths import get_cli_history_path
+
+    history_file = get_cli_history_path()
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _PROMPT_SESSION = PromptSession(
@@ -181,7 +184,6 @@ def onboard() -> None:
     """Инициализация конфигурации и рабочего пространства agentxyz."""
     from agentxyz.config.loader import get_config_path, load_config, save_config
     from agentxyz.config.schema import Config
-    from agentxyz.utils.helpers import get_workspace_path
 
     config_path = get_config_path()
 
@@ -221,7 +223,7 @@ def onboard() -> None:
         )
 
     # Создать файлы bootstrap по умолчанию
-    sync_workspace_templates(workspace)
+    sync_workspace_templates(workspace, console=console)
 
     console.print(f"\n{__logo__} agentxyz готов к работе!")
     console.print("\nДальнейшие действия:")
@@ -267,6 +269,29 @@ def _make_provider(
     )
 
 
+def _load_runtime_config(
+    config: str | None = None, workspace: str | None = None
+) -> Config:
+    """Загружает конфиг и при необходимости меняет активную рабочую директорию."""
+    from agentxyz.config.loader import load_config, set_config_path
+
+    config_path = None
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        if not config_path.exists():
+            console.print(
+                f"[red]Ошибка: Файл конфигурации не найден: {config_path}[/red]"
+            )
+            raise typer.Exit(1)
+        set_config_path(config_path)
+        console.print(f"[dim]Используется конфиг: {config_path}[/dim]")
+
+    loaded = load_config(config_path)
+    if workspace:
+        loaded.agents.defaults.workspace = workspace
+    return loaded
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -278,7 +303,7 @@ def gateway(
     workspace: str | None = typer.Option(
         None, "--workspace", "-w", help="Рабочий каталог"
     ),
-    config_file: str | None = typer.Option(
+    config: str | None = typer.Option(
         None, "--config", "-c", help="Путь к файлу конфигурации"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Подробный лог"),
@@ -287,7 +312,7 @@ def gateway(
     from agentxyz.agent.loop import AgentLoop
     from agentxyz.bus.queue import MessageBus
     from agentxyz.channels.manager import ChannelManager
-    from agentxyz.config.loader import load_config
+    from agentxyz.config.paths import get_cron_dir
     from agentxyz.cron.service import CronService
     from agentxyz.cron.types import CronJob
     from agentxyz.gateway.server import GatewayServer
@@ -299,41 +324,39 @@ def gateway(
 
         logging.basicConfig(level=logging.DEBUG)
 
-    config_path = Path(config_file) if config_file else None
-    config = load_config(config_path)
+    loaded_config = _load_runtime_config(config, workspace)
 
     if workspace:
-        config.agents.defaults.workspace = workspace
+        loaded_config.agents.defaults.workspace = workspace
     console.print(f"{__logo__} Запуск agentxyz Gateway на порту {port}...")
-    sync_workspace_templates(config.workspace_path)
+    sync_workspace_templates(loaded_config.workspace_path, silent=True)
     bus = MessageBus()
-    provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    provider = _make_provider(loaded_config)
+    session_manager = SessionManager(loaded_config.workspace_path)
 
     # Создать сервис cron первым (callback устанавливается после создания агента)
-    # Используем путь workspace для хранилища cron каждого экземпляра
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
+    cron_store_path = get_cron_dir() / "jobs.json"
     cron = CronService(cron_store_path)
 
     # Инициализировать агент и сервис cron
     agent = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
+        workspace=loaded_config.workspace_path,
+        model=loaded_config.agents.defaults.model,
+        temperature=loaded_config.agents.defaults.temperature,
+        max_tokens=loaded_config.agents.defaults.max_tokens,
+        max_iterations=loaded_config.agents.defaults.max_tool_iterations,
+        memory_window=loaded_config.agents.defaults.memory_window,
+        reasoning_effort=loaded_config.agents.defaults.reasoning_effort,
+        brave_api_key=loaded_config.tools.web.search.api_key or None,
+        web_proxy=loaded_config.tools.web.proxy or None,
+        exec_config=loaded_config.tools.exec,
         cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
+        restrict_to_workspace=loaded_config.tools.restrict_to_workspace,
         session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
+        mcp_servers=loaded_config.tools.mcp_servers,
+        channels_config=loaded_config.channels,
     )
 
     # Установить callback cron (требует агент)
@@ -383,7 +406,7 @@ def gateway(
     cron.on_job = on_cron_job
 
     # Создать Gateway сервер (если включён)
-    gateway_config = config.gateway
+    gateway_config = loaded_config.gateway
     gateway_server: GatewayServer | None = None
 
     if gateway_config.enabled:
@@ -394,13 +417,16 @@ def gateway(
         gateway_server = GatewayServer(
             config=gateway_config,
             bus=bus,
-            root_config=config,
+            root_config=loaded_config,
             session_manager=session_manager,
         )
 
     # Создать менеджер каналов (telegram, email) после создания gateway_server
     channels = ChannelManager(
-        config, bus, session_manager=session_manager, gateway_server=gateway_server
+        loaded_config,
+        bus,
+        session_manager=session_manager,
+        gateway_server=gateway_server,
     )
 
     def _pick_heartbeat_target() -> tuple[str, str]:
@@ -446,10 +472,10 @@ def gateway(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)
         )
 
-    hb_cfg = config.gateway.heartbeat
+    hb_cfg = loaded_config.gateway.heartbeat
 
     heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
+        workspace=loaded_config.workspace_path,
         provider=provider,
         model=agent.model,
         on_execute=on_heartbeat_execute,
@@ -494,18 +520,10 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
-
-            # Создать задачи для агента, каналов и опционально gateway
-            tasks = [
+            await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
-            ]
-
-            if gateway_server:
-                tasks.append(gateway_server.start())
-                # Gateway обрабатывается внутри ChannelManager через receive_from_agent
-
-            await asyncio.gather(*tasks)
+            )
         except KeyboardInterrupt:
             console.print("\nЗавершение...")
         finally:
@@ -531,6 +549,12 @@ def agent(
         None, "--message", "-m", help="Сообщение для отправки агенту"
     ),
     session_id: str = typer.Option("cli:default", "--session", "-s", help="ID сеанса"),
+    workspace: str | None = typer.Option(
+        None, "--workspace", "-w", help="Рабочая директория"
+    ),
+    config: str | None = typer.Option(
+        None, "--config", "-c", help="Путь к файлу конфигурации"
+    ),
     markdown: bool = typer.Option(
         True,
         "--markdown/--no-markdown",
@@ -547,16 +571,17 @@ def agent(
 
     from agentxyz.agent.loop import AgentLoop
     from agentxyz.bus.queue import MessageBus
-    from agentxyz.config.loader import get_data_dir, load_config
+    from agentxyz.config.paths import get_cron_dir
     from agentxyz.cron.service import CronService
 
-    config = load_config()
-    sync_workspace_templates(config.workspace_path)
+    loaded_config = _load_runtime_config(config, workspace)
+    sync_workspace_templates(loaded_config.workspace_path, silent=True)
+
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = _make_provider(loaded_config)
 
     # Создать сервис cron для использования инструмента (обратный вызов не нужен для CLI, если он не запущен)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path = get_cron_dir() / "jobs.json"
     cron = CronService(cron_store_path)
 
     if logs:
@@ -567,20 +592,20 @@ def agent(
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
+        workspace=loaded_config.workspace_path,
+        model=loaded_config.agents.defaults.model,
+        temperature=loaded_config.agents.defaults.temperature,
+        max_tokens=loaded_config.agents.defaults.max_tokens,
+        max_iterations=loaded_config.agents.defaults.max_tool_iterations,
+        memory_window=loaded_config.agents.defaults.memory_window,
+        reasoning_effort=loaded_config.agents.defaults.reasoning_effort,
+        brave_api_key=loaded_config.tools.web.search.api_key or None,
+        web_proxy=loaded_config.tools.web.proxy or None,
+        exec_config=loaded_config.tools.exec,
         cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
+        restrict_to_workspace=loaded_config.tools.restrict_to_workspace,
+        mcp_servers=loaded_config.tools.mcp_servers,
+        channels_config=loaded_config.channels,
     )
 
     # Показывать спиннер, когда журналы отключены (нет вывода, который можно пропустить); пропускать, когда журналы включены
