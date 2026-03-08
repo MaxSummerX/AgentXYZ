@@ -1,4 +1,4 @@
-"""Схема конфигурации использующий Pydantic."""
+"""Схема конфигурации использующая Pydantic."""
 
 from pathlib import Path
 from typing import Literal
@@ -67,10 +67,10 @@ class EmailConfig(Base):
 
 
 class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
+    """Конфигурация сервиса сердцебиения."""
 
     enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
+    interval_s: int = 30 * 60  # 30 минут
 
 
 class GatewayAuthConfig(Base):
@@ -132,7 +132,7 @@ class ProviderConfig(Base):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = (
-        None  # Custom headers (например, APP-Code для AiHubMix)
+        None  # Пользовательские заголовки (например, APP-Code для AiHubMix)
     )
 
 
@@ -140,7 +140,9 @@ class TranscriptionConfig(Base):
     """Конфигурация голосовой транскрипции."""
 
     provider: Literal["whisper"] = "whisper"
-    whisper_model: str = "medium"  # tiny, base, small, medium, large-v3
+    whisper_model: str = (
+        "medium"  # tiny, base, small, medium, large-v3 (размеры моделей)
+    )
     whisper_device: str = "cpu"  # cpu или cuda
     language: str = "ru"  # язык по умолчанию
     max_file_size_mb: int = 50
@@ -170,7 +172,7 @@ class ProvidersConfig(Base):
 class WebSearchConfig(Base):
     """Конфигурация веб-поиска."""
 
-    api_key: str = ""  # Brave Search API key
+    api_key: str = ""  # API-ключ Brave Search
     max_results: int = 5
 
 

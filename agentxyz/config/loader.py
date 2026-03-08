@@ -7,12 +7,12 @@ from typing import cast
 from agentxyz.config.schema import Config
 
 
-# Global variable to store current config path (for multi-instance support)
+# Глобальная переменная для хранения текущего пути к конфигу (для поддержки нескольких инстансов)
 _current_config_path: Path | None = None
 
 
 def set_config_path(path: Path) -> None:
-    """Set the current config path (used to derive data directory)."""
+    """Установить текущий путь к конфигу (используется для определения директории данных)."""
     global _current_config_path
     _current_config_path = path
 
@@ -43,8 +43,8 @@ def load_config(config_path: Path | None = None) -> Config:
             data = _migrate_config(data)
             return cast("Config", Config.model_validate(data))
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to load config from {path}: {e}")
-            print("Using default configuration.")
+            print(f"Предупреждение: не удалось загрузить конфиг из {path}: {e}")
+            print("Используется конфигурация по умолчанию.")
 
     return Config()
 

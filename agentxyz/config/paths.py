@@ -1,4 +1,4 @@
-"""Runtime path helpers derived from the active config context."""
+"""Вспомогательные функции для работы с путями, основанные на активном контексте конфигурации."""
 
 from __future__ import annotations
 
@@ -9,33 +9,33 @@ from agentxyz.utils.helpers import ensure_dir
 
 
 def get_data_dir() -> Path:
-    """Return the instance-level runtime data directory."""
+    """Возвращает директорию данных уровня инстанса."""
     return ensure_dir(get_config_path().parent)
 
 
 def get_runtime_subdir(name: str) -> Path:
-    """Return a named runtime subdirectory under the instance data dir."""
+    """Возвращает именованную поддиректорию в директории данных инстанса."""
     return ensure_dir(get_data_dir() / name)
 
 
 def get_media_dir(channel: str | None = None) -> Path:
-    """Return the media directory, optionally namespaced per channel."""
+    """Возвращает директорию медиа, опционально с пространством имён на канал."""
     base = get_runtime_subdir("media")
     return ensure_dir(base / channel) if channel else base
 
 
 def get_cron_dir() -> Path:
-    """Return the cron storage directory."""
+    """Возвращает директорию хранения cron."""
     return get_runtime_subdir("cron")
 
 
 def get_logs_dir() -> Path:
-    """Return the logs directory."""
+    """Возвращает директорию логов."""
     return get_runtime_subdir("logs")
 
 
 def get_workspace_path(workspace: str | None = None) -> Path:
-    """Resolve and ensure the agent workspace path."""
+    """Разрешает и гарантирует существование пути к рабочей области агента."""
     path = (
         Path(workspace).expanduser()
         if workspace
@@ -45,15 +45,15 @@ def get_workspace_path(workspace: str | None = None) -> Path:
 
 
 def get_cli_history_path() -> Path:
-    """Return the shared CLI history file path."""
+    """Возвращает путь к общему файлу истории CLI."""
     return Path.home() / ".agentxyz" / "history" / "cli_history"
 
 
 def get_bridge_install_dir() -> Path:
-    """Return the shared WhatsApp bridge installation directory."""
+    """Возвращает директорию установки общего WhatsApp моста."""
     return Path.home() / ".agentxyz" / "bridge"
 
 
 def get_legacy_sessions_dir() -> Path:
-    """Return the legacy global session directory used for migration fallback."""
+    """Возвращает устаревшую глобальную директорию сессий, используемую как резерв при миграции."""
     return Path.home() / ".agentxyz" / "sessions"
