@@ -8,6 +8,7 @@ import time
 import unicodedata
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import aiofiles
 from loguru import logger
 from telegram import BotCommand, ReplyParameters, Update
 from telegram.ext import (
@@ -20,6 +21,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 
 from agentxyz.channels.base import BaseChannel
+from agentxyz.config.paths import get_media_dir
 from agentxyz.config.schema import TranscriptionConfig
 from agentxyz.utils.helpers import split_message
 
@@ -183,11 +185,9 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         transcription_config: TranscriptionConfig | None = None,
-        groq_api_key: str = "",
     ):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
-        self.groq_api_key = groq_api_key
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Карта sender_id в chat_id для ответов
         self._typing_tasks: dict[
@@ -195,7 +195,27 @@ class TelegramChannel(BaseChannel):
         ] = {}  # chat_id -> задача цикла печати (typing loop task)
         self._media_group_buffers: dict[str, dict] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
+        self._message_threads: dict[tuple[str, int], int] = {}
         self.transcription_config = transcription_config or TranscriptionConfig()
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """Сохраняет легаси-формат allowlist в Telegram: id|username."""
+        if super().is_allowed(sender_id):
+            return True
+
+        allow_list = getattr(self.config, "allow_from", [])
+        if not allow_list or "*" in allow_list:
+            return False
+
+        sender_str = str(sender_id)
+        if sender_str.count("|") != 1:
+            return False
+
+        sid, username = sender_str.split("|", 1)
+        if not sid.isdigit() or not username:
+            return False
+
+        return sid in allow_list or username in allow_list
 
     async def start(self) -> None:
         """Запустить бота Telegram через long polling."""
@@ -211,6 +231,7 @@ class TelegramChannel(BaseChannel):
             pool_timeout=5.0,
             connect_timeout=30.0,
             read_timeout=30.0,
+            proxy=self.config.proxy if self.config.proxy else None,
         )
         builder = (
             Application.builder()
@@ -218,16 +239,13 @@ class TelegramChannel(BaseChannel):
             .request(req)
             .get_updates_request(req)
         )
-        if self.config.proxy:
-            builder = builder.proxy(self.config.proxy).get_updates_proxy(
-                self.config.proxy
-            )
         self._app = builder.build()
         self._app.add_error_handler(self._on_error)
 
         # Добавить обработчики команд
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
+        self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Добавить обработчик сообщений для текста, фото, голоса, документов
@@ -323,10 +341,18 @@ class TelegramChannel(BaseChannel):
         except ValueError:
             logger.error("Неверный chat_id: {}", msg.chat_id)
             return
+        reply_to_message_id = msg.metadata.get("message_id")
+        message_thread_id = msg.metadata.get("message_thread_id")
+        if message_thread_id is None and reply_to_message_id is not None:
+            message_thread_id = self._message_threads.get(
+                (msg.chat_id, reply_to_message_id)
+            )
+        thread_kwargs = {}
+        if message_thread_id is not None:
+            thread_kwargs["message_thread_id"] = message_thread_id
 
         reply_params = None
         if self.config.reply_to_message:
-            reply_to_message_id = msg.metadata.get("message_id")
             if reply_to_message_id:
                 reply_params = ReplyParameters(
                     message_id=reply_to_message_id, allow_sending_without_reply=True
@@ -350,11 +376,13 @@ class TelegramChannel(BaseChannel):
                     else "document"
                 )
 
-                await sender(
-                    chat_id=chat_id,
-                    **{param: media_path},
-                    reply_parameters=reply_params,
-                )
+                async with aiofiles.open(media_path, "rb") as f:
+                    await sender(
+                        chat_id=chat_id,
+                        **{param: f},
+                        reply_parameters=reply_params,
+                        **thread_kwargs,
+                    )
 
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
@@ -363,6 +391,7 @@ class TelegramChannel(BaseChannel):
                     chat_id=chat_id,
                     text=f"[Не удалось отправить: {filename}]",
                     reply_parameters=reply_params,
+                    **thread_kwargs,
                 )
 
         # Отправить текстовое содержимое
@@ -372,12 +401,18 @@ class TelegramChannel(BaseChannel):
             for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
                 # Финальный ответ: имитируем потоковую отправку через draft, затем сохраняем
                 if not is_progress:
-                    await self._send_with_streaming(chat_id, chunk, reply_params)
+                    await self._send_with_streaming(
+                        chat_id, chunk, reply_params, thread_kwargs
+                    )
                 else:
-                    await self._send_text(chat_id, chunk, reply_params)
+                    await self._send_text(chat_id, chunk, reply_params, thread_kwargs)
 
     async def _send_text(
-        self, chat_id: int, text: str, reply_params: ReplyParameters | None = None
+        self,
+        chat_id: int,
+        text: str,
+        reply_params: ReplyParameters | None = None,
+        thread_kwargs: dict | None = None,
     ) -> None:
         """Отправить текстовое сообщение с fallback на обычный текст при ошибке HTML."""
         if not self._app or not self._app.bot:
@@ -389,6 +424,7 @@ class TelegramChannel(BaseChannel):
                 text=html,
                 parse_mode="HTML",
                 reply_parameters=reply_params,
+                **(thread_kwargs or {}),
             )
         except Exception as e:
             logger.warning(
@@ -401,12 +437,17 @@ class TelegramChannel(BaseChannel):
                     chat_id=chat_id,
                     text=text,
                     reply_parameters=reply_params,
+                    **(thread_kwargs or {}),
                 )
             except Exception as e2:
                 logger.error("Ошибка отправки сообщения в Telegram: {}", e2)
 
     async def _send_with_streaming(
-        self, chat_id: int, text: str, reply_params: ReplyParameters | None = None
+        self,
+        chat_id: int,
+        text: str,
+        reply_params: ReplyParameters | None = None,
+        thread_kwargs: dict | None = None,
     ) -> None:
         """Имитировать потоковую отправку через send_message_draft, затем сохранить через send_message."""
         if not self._app or not self._app.bot:
@@ -433,7 +474,7 @@ class TelegramChannel(BaseChannel):
             await asyncio.sleep(0.15)
         except Exception:
             pass
-        await self._send_text(chat_id, text, reply_params)
+        await self._send_text(chat_id, text, reply_params, thread_kwargs)
 
     @staticmethod
     async def _on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -466,16 +507,54 @@ class TelegramChannel(BaseChannel):
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
 
+    @staticmethod
+    def _derive_topic_session_key(message: Any) -> str | None:
+        """Создаёт ключ сессии с привязкой к теме для групповых чатов Telegram."""
+        message_thread_id = getattr(message, "message_thread_id", None)
+        if message.chat.type == "private" or message_thread_id is None:
+            return None
+        return f"telegram:{message.chat_id}:topic:{message_thread_id}"
+
+    @staticmethod
+    def _build_message_metadata(message: Any, user: Any) -> dict:
+        """Создаёт общую структуру метаданных для входящих сообщений Telegram."""
+        return {
+            "message_id": message.message_id,
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "is_group": message.chat.type != "private",
+            "message_thread_id": getattr(message, "message_thread_id", None),
+            "is_forum": bool(getattr(message.chat, "is_forum", False)),
+        }
+
+    def _remember_thread_context(self, message: Any) -> None:
+        """Кэширует id темы по chat_id/message_id для последующих ответов."""
+        message_thread_id = getattr(message, "message_thread_id", None)
+        if message_thread_id is None:
+            return
+        key = (str(message.chat_id), message.message_id)
+        self._message_threads[key] = message_thread_id
+        if len(self._message_threads) > 1000:
+            self._message_threads.pop(next(iter(self._message_threads)))
+
     async def _forward_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Пересылать слэш-команды в шину для унифицированной обработки в AgentLoop."""
-        if not update.message or not update.effective_user or not update.message.text:
+        if not update.message or not update.effective_user:
             return
+        message = update.message
+        user = update.effective_user
+        if message.text is None:
+            return
+        self._remember_thread_context(message)
         await self._handle_message(
-            sender_id=self._sender_id(update.effective_user),
-            chat_id=str(update.message.chat_id),
-            content=update.message.text,
+            sender_id=self._sender_id(user),
+            chat_id=str(message.chat_id),
+            content=message.text,
+            metadata=self._build_message_metadata(message, user),
+            session_key=self._derive_topic_session_key(message),
         )
 
     async def _on_message(
@@ -489,6 +568,7 @@ class TelegramChannel(BaseChannel):
         user = update.effective_user
         chat_id = message.chat_id
         sender_id = self._sender_id(user)
+        self._remember_thread_context(message)
 
         # Храним chat_id для ответов
         self._chat_ids[sender_id] = chat_id
@@ -525,14 +605,11 @@ class TelegramChannel(BaseChannel):
             try:
                 file = await self._app.bot.get_file(media_file.file_id)
                 ext = self._get_extension(
-                    media_type or "", getattr(media_file, "mime_type", None)
+                    media_type or "",
+                    getattr(media_file, "mime_type", None),
+                    getattr(media_file, "file_name", None),
                 )
-
-                # Сохранить в workspace/media/
-                from pathlib import Path
-
-                media_dir = Path.home() / ".agentxyz" / "media"
-                media_dir.mkdir(parents=True, exist_ok=True)
+                media_dir = get_media_dir("telegram")
 
                 file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
                 logger.info("Скачивание в {}...", file_path)
@@ -591,6 +668,8 @@ class TelegramChannel(BaseChannel):
         logger.debug("Сообщение Telegram от {}: {}...", sender_id, content[:50])
 
         str_chat_id = str(chat_id)
+        metadata = self._build_message_metadata(message, user)
+        session_key = self._derive_topic_session_key(message)
 
         # Группы медиа в Telegram: кратковременная буферизация, пересылка как одного агрегированного сообщения.
         if media_group_id := getattr(message, "media_group_id", None):
@@ -601,13 +680,8 @@ class TelegramChannel(BaseChannel):
                     "chat_id": str_chat_id,
                     "contents": [],
                     "media": [],
-                    "metadata": {
-                        "message_id": message.message_id,
-                        "user_id": user.id,
-                        "username": user.username,
-                        "first_name": user.first_name,
-                        "is_group": message.chat.type != "private",
-                    },
+                    "metadata": metadata,
+                    "session_key": session_key,
                 }
                 self._start_typing(str_chat_id)
             buf = self._media_group_buffers[key]
@@ -629,13 +703,8 @@ class TelegramChannel(BaseChannel):
             chat_id=str_chat_id,
             content=content,
             media=media_paths,
-            metadata={
-                "message_id": message.message_id,
-                "user_id": user.id,
-                "username": user.username,
-                "first_name": user.first_name,
-                "is_group": message.chat.type != "private",
-            },
+            metadata=metadata,
+            session_key=session_key,
         )
 
     async def _flush_media_group(self, key: str) -> None:
@@ -651,6 +720,7 @@ class TelegramChannel(BaseChannel):
                 content=content,
                 media=list(dict.fromkeys(buf["media"])),
                 metadata=buf["metadata"],
+                session_key=buf.get("session_key"),
             )
         finally:
             if task := self._media_group_tasks.pop(key, None):
@@ -687,7 +757,11 @@ class TelegramChannel(BaseChannel):
         logger.error("Ошибка Telegram: {}", context.error)
 
     @staticmethod
-    def _get_extension(media_type: str, mime_type: str | None) -> str:
+    def _get_extension(
+        media_type: str,
+        mime_type: str | None,
+        filename: str | None = None,
+    ) -> str:
         """Получить расширение файла по типу медиа."""
         if mime_type:
             ext_map = {
@@ -702,4 +776,12 @@ class TelegramChannel(BaseChannel):
                 return ext_map[mime_type]
 
         type_map = {"image": ".jpg", "voice": ".ogg", "audio": ".mp3", "file": ""}
-        return type_map.get(media_type, "")
+        if ext := type_map.get(media_type, ""):
+            return ext
+
+        if filename:
+            from pathlib import Path
+
+            return "".join(Path(filename).suffixes)
+
+        return ""
