@@ -15,7 +15,11 @@ class MCPToolWrapper(Tool):
     """Оборачивает один инструмент MCP-сервера как инструмент agentxyz."""
 
     def __init__(
-        self, session: Any, server_name: str, tool_def: Any, tool_timeout: int = 30
+        self,
+        session: Any,
+        server_name: str,
+        tool_def: Any,
+        tool_timeout: int | float = 30,
     ) -> None:
         self._session = session
         self._original_name = tool_def.name
@@ -49,6 +53,24 @@ class MCPToolWrapper(Tool):
                 "MCP tool '{}' timed out after {}s", self._name, self._tool_timeout
             )
             return f"(MCP tool call timed out after {self._tool_timeout}s)"
+
+        except asyncio.CancelledError:
+            # Области отмены anyio в MCP SDK могут пропускать CancelledError при таймауте/сбое.
+            # Повторно вызываем исключение только если наша задача была отменена извне (например, /stop).
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                raise
+            logger.warning("Инструмент MCP '{}' был отменён сервером/SDK", self._name)
+            return "(MCP tool call was cancelled)"
+        except Exception as exc:
+            logger.exception(
+                "MCP tool '{}' failed: {}: {}",
+                self._name,
+                type(exc).__name__,
+                exc,
+            )
+            return f"(MCP tool call failed: {type(exc).__name__})"
+
         parts = []
         for block in result.content:
             if isinstance(block, types.TextContent):
