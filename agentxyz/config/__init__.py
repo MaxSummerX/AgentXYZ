@@ -1,7 +1,31 @@
 """Модуль конфигурации для agentxyz."""
 
 from agentxyz.config.loader import get_config_path, load_config
+from agentxyz.config.paths import (
+    get_bridge_install_dir,
+    get_cli_history_path,
+    get_cron_dir,
+    get_data_dir,
+    get_legacy_sessions_dir,
+    get_logs_dir,
+    get_media_dir,
+    get_runtime_subdir,
+    get_workspace_path,
+)
 from agentxyz.config.schema import Config
 
 
-__all__ = ["Config", "get_config_path", "load_config"]
+__all__ = [
+    "Config",
+    "get_bridge_install_dir",
+    "get_cli_history_path",
+    "get_config_path",
+    "get_cron_dir",
+    "get_data_dir",
+    "get_legacy_sessions_dir",
+    "get_logs_dir",
+    "get_media_dir",
+    "get_runtime_subdir",
+    "get_workspace_path",
+    "load_config",
+]

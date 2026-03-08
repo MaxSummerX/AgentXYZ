@@ -7,16 +7,21 @@ from typing import cast
 from agentxyz.config.schema import Config
 
 
+# Global variable to store current config path (for multi-instance support)
+_current_config_path: Path | None = None
+
+
+def set_config_path(path: Path) -> None:
+    """Set the current config path (used to derive data directory)."""
+    global _current_config_path
+    _current_config_path = path
+
+
 def get_config_path() -> Path:
     """Получить путь к файлу конфигурации по умолчанию."""
+    if _current_config_path:
+        return _current_config_path
     return Path.home() / ".agentxyz" / "config.json"
-
-
-def get_data_dir() -> Path:
-    """Получить директорию данных agentxyz."""
-    from agentxyz.utils.helpers import get_data_path
-
-    return get_data_path()
 
 
 def load_config(config_path: Path | None = None) -> Config:

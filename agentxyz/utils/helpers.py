@@ -3,6 +3,11 @@
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 
 def detect_image_mime(data: bytes) -> str | None:
@@ -22,29 +27,6 @@ def ensure_dir(path: Path) -> Path:
     """Гарантирует существование директории, создаёт при необходимости."""
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def get_data_path() -> Path:
-    """Возвращает путь к корневой директории данных agentxyz (~/.agentxyz)."""
-    return ensure_dir(Path.home() / ".agentxyz")
-
-
-def get_workspace_path(workspace: str | None = None) -> Path:
-    """Возвращает путь к рабочей директории.
-
-    Args:
-        workspace: Опциональный путь к рабочей директории.
-            По умолчанию ~/.agentxyz/workspace.
-
-    Returns:
-        Расширенный и гарантированно существующий путь.
-    """
-    path = (
-        Path(workspace).expanduser()
-        if workspace
-        else Path.home() / ".agentxyz" / "workspace"
-    )
-    return ensure_dir(path)
 
 
 def timestamp() -> str:
@@ -93,7 +75,9 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
     return chunks
 
 
-def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
+def sync_workspace_templates(
+    workspace: Path, silent: bool = False, console: "Console | None" = None
+) -> list[str]:
     """Синхронизировать встроенные шаблоны с рабочим пространством. Создаёт только отсутствующие файлы.."""
     from importlib.resources import files as pkg_files
     from importlib.resources.abc import Traversable
@@ -124,8 +108,10 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     (workspace / "skills").mkdir(exist_ok=True)
 
     if added and not silent:
-        from rich.console import Console
+        if console is None:
+            from rich.console import Console
 
+            console = Console()
         for name in added:
-            Console().print(f"  [dim]Создан {name}[/dim]")
+            console.print(f"  [dim]Создан {name}[/dim]")
     return added
