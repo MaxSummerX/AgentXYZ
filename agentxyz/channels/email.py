@@ -1,4 +1,4 @@
-"""Email channel implementation using IMAP polling + SMTP replies."""
+"""Реализация канала электронной почты с использованием IMAP-опроса и SMTP-ответов."""
 
 import asyncio
 import html

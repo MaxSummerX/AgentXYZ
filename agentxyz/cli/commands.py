@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
-# Force UTF-8 encoding for Windows console
+# Принудительное использование кодировки UTF-8 для консоли Windows
 if sys.platform == "win32":
     if sys.stdout.encoding != "utf-8":
         os.environ["PYTHONIOENCODING"] = "utf-8"
-        # Re-open stdout/stderr with UTF-8 encoding
+        # Переоткрыть stdout/stderr с кодировкой UTF-8
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -410,7 +410,7 @@ def gateway(
     gateway_server: GatewayServer | None = None
 
     if gateway_config.enabled:
-        # Override port from CLI if provided
+        # Переопределить порт из CLI, если указан
         if port != 8888:
             gateway_config.port = port
 
