@@ -65,7 +65,7 @@ class WebSearchTool(Tool):
         exa_api_key: str | None = None,
         tavily_api_key: str | None = None,
         brave_api_key: str | None = None,
-        max_results: int = 5,
+        max_results: int = 10,
         proxy: str | None = None,
     ):
         self.exa_api_key = exa_api_key or os.environ.get("EXA_API_KEY", "")
@@ -90,15 +90,23 @@ class WebSearchTool(Tool):
                 "query": {"type": "string", "description": "Search query"},
                 "max_results": {
                     "type": "integer",
-                    "description": "Results (1-10)",
+                    "description": f"Results (1-{self.max_results})",
                     "minimum": 1,
-                    "maximum": 10,
+                    "maximum": self.max_results,
                 },
                 "engine": {
                     "type": "string",
                     "enum": ["auto", "exa", "tavily", "ddgs", "brave"],
                     "default": "auto",
-                    "description": "Search engine: auto (try Exa->Tavily->DDGS->Brave), exa, tavily, or brave",
+                    "description": (
+                        "Search engine to use. Options: "
+                        "auto (automatic fallback: Exa→Tavily→DDGS→Brave), "
+                        "exa (best for AI/semantic search, high-quality results), "
+                        "tavily (deep search with good content extraction), "
+                        "ddgs (DuckDuckGo, free, no API key needed), "
+                        "brave (privacy-focused, independent search). "
+                        "Use 'auto' for automatic selection, or specify engine if user requests it."
+                    ),
                 },
             },
             "required": ["query"],
@@ -112,6 +120,7 @@ class WebSearchTool(Tool):
         **kwargs: Any,
     ) -> str:
         """Выполнить поиск с fallback."""
+        max_results = min(max(max_results, 1), self.max_results)
         if engine == "auto":
             # Пробуем по приоритету
             engines = ["exa", "tavily", "ddgs", "brave"]
@@ -119,7 +128,9 @@ class WebSearchTool(Tool):
             engines = [engine]
 
         for eng in engines:
-            result = await self._try_search(eng, query, max_results)
+            result = await self._try_search(
+                eng, query, min(max(max_results, 1), max_results)
+            )
             if result:
                 return result
 
@@ -136,22 +147,36 @@ class WebSearchTool(Tool):
         }
 
         if engine in key_required and not key_required[engine]:
-            logger.debug("Skipping {}: API key not set", engine)
+            logger.debug("WebSearch: пропускаю {} (нет API ключа)", engine)
             return None
 
+        logger.debug("WebSearch: пробую {} для запроса: {}", engine, query[:50])
         try:
             if engine == "exa":
-                return await self._search_exa(query, max_results)
+                result = await self._search_exa(query, max_results)
             elif engine == "tavily":
-                return await self._search_tavily(query, max_results)
+                result = await self._search_tavily(query, max_results)
             elif engine == "ddgs":
-                return await self._search_ddgs(query, max_results)
+                result = await self._search_ddgs(query, max_results)
             elif engine == "brave":
-                return await self._search_brave(query, max_results)
+                result = await self._search_brave(query, max_results)
+            else:
+                return None
+
+            if (
+                result
+                and not result.startswith("Error:")
+                and not result.startswith("No results")
+            ):
+                logger.info(
+                    "WebSearch: успешно использован {} ({} результатов)",
+                    engine,
+                    max_results,
+                )
+            return result
         except Exception as e:
             logger.warning("{} search failed: {}", engine, e)
             return None
-        return None
 
     async def _search_exa(self, query: str, max_results: int) -> str | None:
 
@@ -162,7 +187,7 @@ class WebSearchTool(Tool):
                 exa.search,
                 query=query,
                 type="auto",
-                num_results=min(max(max_results, 1), 10),
+                num_results=max_results,
                 contents={"text": {"max_characters": 7500}},  # type: ignore[arg-type]
             )
 
@@ -194,7 +219,7 @@ class WebSearchTool(Tool):
             async with httpx.AsyncClient(timeout=30.0) as client:
                 payload = {
                     "query": query,
-                    "max_results": min(max(max_results, 1), 10),
+                    "max_results": max_results,
                     "search_depth": "basic",
                     "topic": "general",
                 }
@@ -235,7 +260,7 @@ class WebSearchTool(Tool):
         try:
             # Запускаем синхронный DDGS в потоке, не блокируя event loop
             results: list[dict] = await asyncio.to_thread(
-                lambda: DDGS().text(query, max_results=min(max(max_results, 1), 10))
+                lambda: DDGS().text(query, max_results=max_results)
             )
 
             if not results:
@@ -256,14 +281,13 @@ class WebSearchTool(Tool):
     async def _search_brave(self, query: str, max_results: int, **kwargs: Any) -> str:
 
         try:
-            n = min(max(max_results or self.max_results, 1), 10)
             logger.debug(
                 "WebSearch: {}", "прокси включён" if self.proxy else "прямое соединение"
             )
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
+                    params={"q": query, "count": max_results},
                     headers={
                         "Accept": "application/json",
                         "X-Subscription-Token": self.brave_api_key,
@@ -272,12 +296,12 @@ class WebSearchTool(Tool):
                 )
                 r.raise_for_status()
 
-            results = r.json().get("web", {}).get("results", [])[:n]
+            results = r.json().get("web", {}).get("results", [])[:max_results]
             if not results:
                 return f"No results for: {query}"
 
             lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
+            for i, item in enumerate(results[:max_results], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
