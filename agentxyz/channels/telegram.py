@@ -197,6 +197,8 @@ class TelegramChannel(BaseChannel):
         self._media_group_tasks: dict[str, asyncio.Task] = {}
         self._message_threads: dict[tuple[str, int], int] = {}
         self.transcription_config = transcription_config or TranscriptionConfig()
+        self._bot_user_id: int | None = None
+        self._bot_username: str | None = None
 
     def is_allowed(self, sender_id: str) -> bool:
         """Сохраняет легаси-формат allowlist в Telegram: id|username."""
@@ -271,6 +273,8 @@ class TelegramChannel(BaseChannel):
 
         # Получить данные бота
         bot_info = await self._app.bot.get_me()
+        self._bot_user_id = getattr(bot_info, "id", None)
+        self._bot_username = getattr(bot_info, "username", None)
         logger.info("Бот Telegram @{} подключён", bot_info.username)
 
         try:
@@ -528,6 +532,76 @@ class TelegramChannel(BaseChannel):
             "is_forum": bool(getattr(message.chat, "is_forum", False)),
         }
 
+    async def _ensure_bot_identity(self) -> tuple[int | None, str | None]:
+        """Загрузить данные бота один раз и переиспользовать для проверок упоминаний и ответов."""
+        if self._bot_user_id is not None or self._bot_username is not None:
+            return self._bot_user_id, self._bot_username
+        if not self._app:
+            return None, None
+        bot_info = await self._app.bot.get_me()
+        self._bot_user_id = getattr(bot_info, "id", None)
+        self._bot_username = getattr(bot_info, "username", None)
+        return self._bot_user_id, self._bot_username
+
+    @staticmethod
+    def _has_mention_entity(
+        text: str,
+        entities: Any,
+        bot_username: str,
+        bot_id: int | None,
+    ) -> bool:
+        """Проверить, содержит ли сообщение упоминание бота через entities."""
+        handle = f"@{bot_username}".lower()
+        for entity in entities or []:
+            entity_type = getattr(entity, "type", None)
+            if entity_type == "text_mention":
+                user = getattr(entity, "user", None)
+                if (
+                    user is not None
+                    and bot_id is not None
+                    and getattr(user, "id", None) == bot_id
+                ):
+                    return True
+                continue
+            if entity_type != "mention":
+                continue
+            offset = getattr(entity, "offset", None)
+            length = getattr(entity, "length", None)
+            if offset is None or length is None:
+                continue
+            if text[offset : offset + length].lower() == handle:
+                return True
+        return handle in text.lower()
+
+    async def _is_group_message_for_bot(self, message: Any) -> bool:
+        """Определить, предназначено ли групповое сообщение боту согласно политике доступа."""
+        if message.chat.type == "private" or self.config.group_policy == "open":
+            return True
+
+        bot_id, bot_username = await self._ensure_bot_identity()
+        if bot_username:
+            text = message.text or ""
+            caption = message.caption or ""
+            if self._has_mention_entity(
+                text,
+                getattr(message, "entities", None),
+                bot_username,
+                bot_id,
+            ):
+                return True
+            if self._has_mention_entity(
+                caption,
+                getattr(message, "caption_entities", None),
+                bot_username,
+                bot_id,
+            ):
+                return True
+
+        reply_user = getattr(
+            getattr(message, "reply_to_message", None), "from_user", None
+        )
+        return bool(bot_id and reply_user and reply_user.id == bot_id)
+
     def _remember_thread_context(self, message: Any) -> None:
         """Кэширует id темы по chat_id/message_id для последующих ответов."""
         message_thread_id = getattr(message, "message_thread_id", None)
@@ -572,6 +646,9 @@ class TelegramChannel(BaseChannel):
 
         # Храним chat_id для ответов
         self._chat_ids[sender_id] = chat_id
+
+        if not await self._is_group_message_for_bot(message):
+            return
 
         # Формируем содержание из текста и/или медиа
         content_parts = []
