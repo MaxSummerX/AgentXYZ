@@ -299,7 +299,7 @@ def _load_runtime_config(
 
 @app.command()
 def gateway(
-    port: int = typer.Option(8888, "--port", "-p", help="Порт Gateway"),
+    port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
     workspace: str | None = typer.Option(
         None, "--workspace", "-w", help="Рабочий каталог"
     ),
@@ -325,6 +325,7 @@ def gateway(
         logging.basicConfig(level=logging.DEBUG)
 
     loaded_config = _load_runtime_config(config, workspace)
+    port = port if port is not None else loaded_config.gateway.port
 
     if workspace:
         loaded_config.agents.defaults.workspace = workspace
@@ -410,9 +411,7 @@ def gateway(
     gateway_server: GatewayServer | None = None
 
     if gateway_config.enabled:
-        # Переопределить порт из CLI, если указан
-        if port != 8888:
-            gateway_config.port = port
+        gateway_config.port = port
 
         gateway_server = GatewayServer(
             config=gateway_config,
@@ -520,10 +519,10 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            tasks = [agent.run(), channels.start_all()]
+            if gateway_server:
+                tasks.append(gateway_server.start())
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nЗавершение...")
         finally:
