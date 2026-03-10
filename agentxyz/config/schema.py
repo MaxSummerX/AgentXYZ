@@ -28,6 +28,9 @@ class TelegramConfig(Base):
     reply_to_message: bool = (
         False  # Если true, ответы бота цитируют исходное сообщение"
     )
+    group_policy: Literal["open", "mention"] = (
+        "mention"  # "mention" отвечает когда бота упоминают или отвечают на его сообщение, "open" отвечает на все сообщения
+    )
 
 
 class EmailConfig(Base):
