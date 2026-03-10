@@ -119,7 +119,7 @@ class MemoryStore:
 {chr(10).join(lines)}"""
 
         try:
-            response = await provider.chat(
+            response = await provider.chat_with_retry(
                 messages=[
                     {
                         "role": "system",

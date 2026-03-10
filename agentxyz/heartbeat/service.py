@@ -88,7 +88,7 @@ class HeartbeatService:
 
         Возвращает (action, tasks), где action — 'skip' или 'run'.
         """
-        response = await self.provider.chat(
+        response = await self.provider.chat_with_retry(
             messages=[
                 {
                     "role": "system",
