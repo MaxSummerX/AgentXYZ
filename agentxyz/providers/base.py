@@ -1,8 +1,11 @@
 """Базовый интерфейс поставщика LLM."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+from loguru import logger
 
 
 @dataclass
@@ -38,6 +41,22 @@ class LLMProvider(ABC):
     Реализации должны учитывать специфику API каждого поставщика,
     при этом поддерживая согласованный интерфейс.
     """
+
+    _CHAT_RETRY_DELAYS = (1, 2, 4)
+    _TRANSIENT_ERROR_MARKERS = (
+        "429",
+        "rate limit",
+        "500",
+        "502",
+        "503",
+        "504",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "connection",
+        "server error",
+        "temporarily unavailable",
+    )
 
     def __init__(
         self,
@@ -138,6 +157,71 @@ class LLMProvider(ABC):
             LLMResponse, содержащий контент и/или вызовы инструментов.
         """
         pass
+
+    @classmethod
+    def _is_transient_error(cls, content: str | None) -> bool:
+        err = (content or "").lower()
+        return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
+
+    async def chat_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Вызвать chat() с повторными попытками при временных ошибках провайдера."""
+        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+            try:
+                response = await self.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                response = LLMResponse(
+                    content=f"Error calling LLM: {exc}",
+                    finish_reason="error",
+                )
+
+            if response.finish_reason != "error":
+                return response
+            if not self._is_transient_error(response.content):
+                return response
+
+            err = (response.content or "").lower()
+            logger.warning(
+                "Временная ошибка LLM (попытка {}/{}), повтор через {}s: {}",
+                attempt,
+                len(self._CHAT_RETRY_DELAYS),
+                delay,
+                err[:120],
+            )
+            await asyncio.sleep(delay)
+
+        try:
+            return await self.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return LLMResponse(
+                content=f"Error calling LLM: {exc}",
+                finish_reason="error",
+            )
 
     @abstractmethod
     def get_default_model(self) -> str:
