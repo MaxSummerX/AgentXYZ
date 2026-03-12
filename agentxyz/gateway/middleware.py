@@ -55,7 +55,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             )
             raise
 
-    def _get_client_ip(self, request: Request) -> str:
+    @staticmethod
+    def _get_client_ip(request: Request) -> str:
         """Получает IP адрес клиента."""
         # Проверяем заголовки прокси
         forwarded: str | None = request.headers.get("X-Forwarded-For")

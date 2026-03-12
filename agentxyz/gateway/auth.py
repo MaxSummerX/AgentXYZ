@@ -45,7 +45,8 @@ class GatewayAuth:
         else:
             self._token = config.api_token
 
-    def _generate_token(self) -> str:
+    @staticmethod
+    def _generate_token() -> str:
         """
         Сгенерировать случайный API токен.
 
@@ -115,7 +116,8 @@ class GatewayAuth:
                     detail=f"IP {client_ip} не в списке разрешённых",
                 )
 
-    def _get_client_ip(self, request: Request) -> str:
+    @staticmethod
+    def _get_client_ip(request: Request) -> str:
         """
         Получить IP адрес клиента.
 

@@ -3,5 +3,5 @@
 from agentxyz.gateway.server import GatewayServer
 
 
-__all__ = ["GatewayServer"]
+__all__ = ["GatewayServer", "__version__"]
 __version__ = "0.1.0"
