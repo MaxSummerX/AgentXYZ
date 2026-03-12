@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 from agentxyz.agent.memory import MemoryStore
 from agentxyz.agent.skills import SkillsLoader
-from agentxyz.utils.helpers import detect_image_mime
+from agentxyz.utils.helpers import build_assistant_message, detect_image_mime
 
 
 class ContextBuilder:
@@ -266,14 +266,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         Returns:
             Обновленный список сообщений.
         """
-        msg: dict[str, Any] = {"role": "assistant", "content": content}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-
-        # Модели рассуждения не принимают историю без этого
-        if reasoning_content is not None:
-            msg["reasoning_content"] = reasoning_content
-        if thinking_blocks:
-            msg["thinking_blocks"] = thinking_blocks
-        messages.append(msg)
+        messages.append(
+            build_assistant_message(
+                content,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_content,
+                thinking_blocks=thinking_blocks,
+            )
+        )
         return messages
