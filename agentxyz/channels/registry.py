@@ -1,4 +1,4 @@
-"""Auto-discovery for channel modules — no hardcoded registry."""
+"""Авто-обнаружение модулей каналов — без жёстко прописанного реестра."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ _INTERNAL = frozenset({"base", "manager", "registry"})
 
 
 def discover_channel_names() -> list[str]:
-    """Return all channel module names by scanning the package (zero imports)."""
+    """Вернуть все имена модулей каналов сканированием пакета (без импортов).
+
+    Returns:
+        Список имён модулей каналов, исключая внутренние (base, manager, registry).
+    """
     import agentxyz.channels as pkg
 
     return [
@@ -25,7 +29,17 @@ def discover_channel_names() -> list[str]:
 
 
 def load_channel_class(module_name: str) -> type[BaseChannel]:
-    """Import *module_name* and return the first BaseChannel subclass found."""
+    """Импортировать модуль и вернуть первый найденный класс-наследник BaseChannel.
+
+    Args:
+        module_name: Имя модуля канала для импорта (например, "telegram", "email").
+
+    Returns:
+        Класс канала, наследующий BaseChannel.
+
+    Raises:
+        ImportError: Если в модуле не найден класс-наследник BaseChannel.
+    """
     from agentxyz.channels.base import BaseChannel as _Base
 
     mod = importlib.import_module(f"agentxyz.channels.{module_name}")
