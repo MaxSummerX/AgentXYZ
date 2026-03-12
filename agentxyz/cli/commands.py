@@ -213,6 +213,9 @@ def onboard() -> None:
         save_config(Config())
         console.print(f"[green]✓[/green] Создана конфигурация по пути {config_path}")
 
+    console.print(
+        "[dim]Шаблон конфигурации теперь использует `maxTokens` + `contextWindowTokens`; `memoryWindow` больше не является настройкой времени выполнения.[/dim]"
+    )
     # Создать рабочее пространство
     workspace = get_workspace_path()
 
@@ -237,6 +240,7 @@ def _make_provider(
     config: Config,
 ) -> LiteLLMProvider | CustomProvider:
     """Создать LiteLLMProvider из конфигурации. Завершает работу, если API-ключ не найден."""
+    from agentxyz.providers.base import GenerationSettings
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
@@ -251,22 +255,36 @@ def _make_provider(
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
         )
-    from agentxyz.providers.litellm_provider import LiteLLMProvider
-    from agentxyz.providers.registry import find_by_name
+    else:
+        from agentxyz.providers.litellm_provider import LiteLLMProvider
+        from agentxyz.providers.registry import find_by_name
 
-    spec = find_by_name(provider_name or "")
-    if not model.startswith("bedrock/") and not (p and p.api_key) and not spec:
-        console.print("[red]Ошибка: API-ключ не настроен.[/red]")
-        console.print("Установите его в ~/.agentxyz/config.json в разделе providers")
-        raise typer.Exit(1)
+        spec = find_by_name(provider_name or "")
+        if (
+            not model.startswith("bedrock/")
+            and not (p and p.api_key)
+            and not (spec and spec.is_local)
+        ):
+            console.print("[red]Ошибка: API-ключ не настроен.[/red]")
+            console.print(
+                "Установите его в ~/.agentxyz/config.json в разделе providers"
+            )
+            raise typer.Exit(1)
+        provider = LiteLLMProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            provider_name=provider_name,
+        )
 
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        provider_name=provider_name,
+    defaults = config.agents.defaults
+    provider.generation = GenerationSettings(
+        temperature=defaults.temperature,
+        max_tokens=defaults.max_tokens,
+        reasoning_effort=defaults.reasoning_effort,
     )
+    return provider
 
 
 def _load_runtime_config(
@@ -290,6 +308,16 @@ def _load_runtime_config(
     if workspace:
         loaded.agents.defaults.workspace = workspace
     return loaded
+
+
+def _print_deprecated_memory_window_notice(config: Config) -> None:
+    """Предупредить при работе со старой конфигурацией только с memoryWindow."""
+    if config.agents.defaults.should_warn_deprecated_memory_window:
+        console.print(
+            "[yellow]Подсказка:[/yellow] Обнаружен устаревший `memoryWindow` без "
+            "`contextWindowTokens`. `memoryWindow` игнорируется; запустите "
+            "[cyan]agentxyz onboard[/cyan] чтобы обновить шаблон конфигурации."
+        )
 
 
 # ============================================================================
@@ -325,6 +353,7 @@ def gateway(
         logging.basicConfig(level=logging.DEBUG)
 
     loaded_config = _load_runtime_config(config, workspace)
+    _print_deprecated_memory_window_notice(loaded_config)
     port = port if port is not None else loaded_config.gateway.port
 
     if workspace:
@@ -345,11 +374,8 @@ def gateway(
         provider=provider,
         workspace=loaded_config.workspace_path,
         model=loaded_config.agents.defaults.model,
-        temperature=loaded_config.agents.defaults.temperature,
-        max_tokens=loaded_config.agents.defaults.max_tokens,
         max_iterations=loaded_config.agents.defaults.max_tool_iterations,
-        memory_window=loaded_config.agents.defaults.memory_window,
-        reasoning_effort=loaded_config.agents.defaults.reasoning_effort,
+        context_window_tokens=loaded_config.agents.defaults.context_window_tokens,
         brave_api_key=loaded_config.tools.web.search.api_key or None,
         web_proxy=loaded_config.tools.web.proxy or None,
         exec_config=loaded_config.tools.exec,
@@ -574,6 +600,7 @@ def agent(
     from agentxyz.cron.service import CronService
 
     loaded_config = _load_runtime_config(config, workspace)
+    _print_deprecated_memory_window_notice(loaded_config)
     sync_workspace_templates(loaded_config.workspace_path, silent=True)
 
     bus = MessageBus()
@@ -593,11 +620,8 @@ def agent(
         provider=provider,
         workspace=loaded_config.workspace_path,
         model=loaded_config.agents.defaults.model,
-        temperature=loaded_config.agents.defaults.temperature,
-        max_tokens=loaded_config.agents.defaults.max_tokens,
         max_iterations=loaded_config.agents.defaults.max_tool_iterations,
-        memory_window=loaded_config.agents.defaults.memory_window,
-        reasoning_effort=loaded_config.agents.defaults.reasoning_effort,
+        context_window_tokens=loaded_config.agents.defaults.context_window_tokens,
         brave_api_key=loaded_config.tools.web.search.api_key or None,
         web_proxy=loaded_config.tools.web.proxy or None,
         exec_config=loaded_config.tools.exec,
@@ -641,7 +665,7 @@ def agent(
 
         _init_prompt_session()
         console.print(
-            f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n"
+            f"{__logo__} Интерактивный режим (введите [bold]exit[/bold] или [bold]Ctrl+C[/bold] для выхода)\n"
         )
 
         if ":" in session_id:
@@ -763,6 +787,7 @@ app.add_typer(channels_app, name="channels")
 @channels_app.command("status")
 def channels_status() -> None:
     """Показать статус каналов."""
+    from agentxyz.channels.registry import discover_channel_names, load_channel_class
     from agentxyz.config.loader import load_config
 
     config = load_config()
@@ -772,15 +797,18 @@ def channels_status() -> None:
     table.add_column("Включён", style="green")
     table.add_column("Конфигурация", style="yellow")
 
-    # Telegram
-    tg = config.channels.telegram
-    tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]не настроен[/dim]"
-    table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
-
-    # Email
-    em = config.channels.email
-    em_config = em.imap_host if em.imap_host else "[dim]не настроен[/dim]"
-    table.add_row("Email", "✓" if em.enabled else "✗", em_config)
+    for modname in sorted(discover_channel_names()):
+        section = getattr(config.channels, modname, None)
+        enabled = section and getattr(section, "enabled", False)
+        try:
+            cls = load_channel_class(modname)
+            display = cls.display_name
+        except ImportError:
+            display = modname.title()
+        table.add_row(
+            display,
+            "[green]\u2713[/green]" if enabled else "[dim]\u2717[/dim]",
+        )
 
     console.print(table)
 
@@ -827,7 +855,7 @@ def status() -> None:
             else:
                 has_key = bool(p.api_key)
                 console.print(
-                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}"
+                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]не настроен[/dim]'}"
                 )
 
 
