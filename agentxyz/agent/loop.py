@@ -2,8 +2,9 @@
 
 import asyncio
 import json
+import os
 import re
-import weakref
+import sys
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 from loguru import logger
 
 from agentxyz.agent.context import ContextBuilder
-from agentxyz.agent.memory import MemoryStore
+from agentxyz.agent.memory import MemoryConsolidator
 from agentxyz.agent.subagent import SubagentManager
 from agentxyz.agent.tools.cron import CronTool
 from agentxyz.agent.tools.filesystem import (
@@ -46,7 +47,7 @@ class AgentLoop:
     5. Отправляет ответы обратно
     """
 
-    _TOOL_RESULT_MAX_CHARS = 500
+    _TOOL_RESULT_MAX_CHARS = 16_000
 
     def __init__(
         self,
@@ -55,10 +56,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 40,
-        temperature: float = 0.2,
-        max_tokens: int = 4096,
-        memory_window: int = 100,
-        reasoning_effort: str | None = None,
+        context_window_tokens: int = 65_536,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -68,6 +66,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):
+        from agentxyz.config.schema import ExecToolConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -75,10 +74,7 @@ class AgentLoop:
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.memory_window = memory_window
-        self.reasoning_effort = reasoning_effort
+        self.context_window_tokens = context_window_tokens
         self.brave_api_key = brave_api_key
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
@@ -93,9 +89,6 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            reasoning_effort=reasoning_effort,
             brave_api_key=brave_api_key,
             web_proxy=web_proxy,
             exec_config=self.exec_config,
@@ -107,17 +100,17 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._consolidating: set[str] = (
-            set()
-        )  # Ключи сессий с выполняемой консолидацией
-        self._consolidation_tasks: set[asyncio.Task] = (
-            set()
-        )  # Сильные ссылки на активные задачи
-        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
-            weakref.WeakValueDictionary()
-        )
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self.memory_consolidator = MemoryConsolidator(
+            workspace=workspace,
+            provider=provider,
+            model=self.model,
+            sessions=self.sessions,
+            context_window_tokens=context_window_tokens,
+            build_messages=self.context.build_messages,
+            get_tool_definitions=self.tools.get_definitions,
+        )
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -238,13 +231,12 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            tool_defs = self.tools.get_definitions()
+
             response = await self.provider.chat_with_retry(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_defs,
                 model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                reasoning_effort=self.reasoning_effort,
             )
 
             if response.has_tool_calls:
@@ -257,17 +249,7 @@ class AgentLoop:
                     )
 
                 tool_call_dicts = [
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.name,
-                            "arguments": json.dumps(
-                                tool_call.arguments, ensure_ascii=False
-                            ),
-                        },
-                    }
-                    for tool_call in response.tool_calls
+                    tc.to_openai_tool_call() for tc in response.tool_calls
                 ]
                 messages = self.context.add_assistant_message(
                     messages,
@@ -330,8 +312,11 @@ class AgentLoop:
             except TimeoutError:
                 continue
 
-            if msg.content.strip().lower() == "/stop":
+            cmd = msg.content.strip().lower()
+            if cmd == "/stop":
                 await self._handle_stop(msg)
+            elif cmd == "/restart":
+                await self._handle_restart(msg)
             else:
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
@@ -368,6 +353,24 @@ class AgentLoop:
                 content=content,
             )
         )
+
+    async def _handle_restart(self, msg: InboundMessage) -> None:
+        """Перезапустить процесс на месте через os.execv."""
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Restarting...",
+            )
+        )
+
+        async def _do_restart() -> None:
+            await asyncio.sleep(1)
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+
+        task = asyncio.create_task(_do_restart())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Обработать сообщение под глобальной блокировкой."""
@@ -440,8 +443,9 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.memory_window)
+            history = session.get_history(max_messages=0)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
@@ -451,6 +455,7 @@ class AgentLoop:
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
@@ -469,30 +474,20 @@ class AgentLoop:
         # Обрабатываем слэш-команды
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            # Захватить сообщения перед очисткой (избежать race condition с фоновой задачей)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-            self._consolidating.add(session.key)
             try:
-                async with lock:
-                    snapshot = session.messages[session.last_consolidated :]
-                    if snapshot:
-                        temp = Session(key=session.key)
-                        temp.messages = list(snapshot)
-                        if not await self._consolidate_memory(temp, archive_all=True):
-                            return OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content="Memory archival failed, session not cleared. Please try again.",
-                            )
+                if not await self.memory_consolidator.archive_unconsolidated(session):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="Не удалось архивировать память, сессия не очищена. Попробуйте снова.",
+                    )
             except Exception:
                 logger.exception("/new archival failed for {}", session.key)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="Memory archival failed, session not cleared. Please try again.",
+                    content="Не удалось архивировать память, сессия не очищена. Попробуйте снова.",
                 )
-            finally:
-                self._consolidating.discard(session.key)
 
             session.clear()
             self.sessions.save(session)
@@ -504,33 +499,19 @@ class AgentLoop:
                 content="🔥 Начата новая сессия.",
             )
         if cmd == "/help":
+            lines = [
+                "🔥 agentxyz команды:",
+                "/new — Начать новый разговор",
+                "/stop — Остановить текущую задачу",
+                "/restart — Перезапустить бота",
+                "/help — Показать доступные команды",
+            ]
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="🔥 agentxyz команды:\n/new — Начать новый разговор\n/help — Показать доступные команды",
+                content="\n".join(lines),
             )
-
-        # Консолидировать память перед обработкой, если сессия слишком большая
-        unconsolidated = len(session.messages) - session.last_consolidated
-        if (
-            unconsolidated >= self.memory_window
-            and session.key not in self._consolidating
-        ):
-            self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock() -> None:
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session)
-                finally:
-                    self._consolidating.discard(session.key)
-                    _task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidation_tasks.discard(_task)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(_task)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -538,7 +519,7 @@ class AgentLoop:
                 message_tool.start_turn()
 
         # Построить начальные сообщения (использовать get_history для сообщений в формате LLM)
-        history = session.get_history(max_messages=self.memory_window)
+        history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -571,6 +552,7 @@ class AgentLoop:
         # Сохранить в сеанс
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         if (
             (mt := self.tools.get("message"))
@@ -640,18 +622,6 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
-
-    async def _consolidate_memory(
-        self, session: Session, archive_all: bool = False
-    ) -> bool:
-        """Сохраняет сообщения нового хода в сессию, обрезая большие результаты инструментов."""
-        return await MemoryStore(self.workspace).consolidate(
-            session,
-            self.provider,
-            self.model,
-            archive_all=archive_all,
-            memory_window=self.memory_window,
-        )
 
     async def process_direct(
         self,

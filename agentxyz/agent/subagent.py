@@ -20,6 +20,7 @@ from agentxyz.agent.tools.web import WebFetchTool, WebSearchTool
 from agentxyz.bus.events import InboundMessage
 from agentxyz.bus.queue import MessageBus
 from agentxyz.providers.base import LLMProvider
+from agentxyz.utils.helpers import build_assistant_message
 
 
 if TYPE_CHECKING:
@@ -41,9 +42,6 @@ class SubagentManager:
         workspace: Path,
         bus: MessageBus,
         model: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
@@ -55,9 +53,6 @@ class SubagentManager:
         self.workspace = workspace
         self.bus = bus
         self.model = model or provider.get_default_model()
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.reasoning_effort = reasoning_effort
         self.brave_api_key = brave_api_key
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
@@ -169,32 +164,21 @@ class SubagentManager:
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
                 )
 
                 if response.has_tool_calls:
                     # Добавить сообщение ассистента с вызовами инструментов
                     tool_call_dicts = [
-                        {
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_call.name,
-                                "arguments": json.dumps(
-                                    tool_call.arguments, ensure_ascii=False
-                                ),
-                            },
-                        }
+                        tool_call.to_openai_tool_call()
                         for tool_call in response.tool_calls
                     ]
                     messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response.content or "",
-                            "tool_calls": tool_call_dicts,
-                        }
+                        build_assistant_message(
+                            response.content or "",
+                            tool_calls=tool_call_dicts,
+                            reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        )
                     )
 
                     # Выполнить инструменты
