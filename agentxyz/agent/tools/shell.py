@@ -127,8 +127,7 @@ class ExecTool(Tool):
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
 
-            if process.returncode != 0:
-                output_parts.append(f"\nExit code: {process.returncode}")
+            output_parts.append(f"\nExit code: {process.returncode}")
 
             result = "\n".join(output_parts) if output_parts else "(no output)"
 
