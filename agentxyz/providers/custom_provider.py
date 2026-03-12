@@ -50,6 +50,7 @@ class CustomProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Отправить запрос на OpenAI-совместимый endpoint.
@@ -61,6 +62,7 @@ class CustomProvider(LLMProvider):
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура генерации (0-1).
             reasoning_effort: Уровень усилий на рассуждение для моделей o1 (low/medium/high).
+            tool_choice: Управление выбором инструмента ("auto", "none", имя функции или объект dict).
 
         Returns:
             LLMResponse с контентом и/или вызовами инструментов.
@@ -74,7 +76,7 @@ class CustomProvider(LLMProvider):
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
-            kwargs.update(tools=tools, tool_choice="auto")
+            kwargs.update(tools=tools, tool_choice=tool_choice or "auto")
         try:
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
