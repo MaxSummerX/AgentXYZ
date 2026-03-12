@@ -239,6 +239,7 @@ class LiteLLMProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Отправить запрос на генерацию ответа через LiteLLM
@@ -250,6 +251,7 @@ class LiteLLMProvider(LLMProvider):
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура семплинга (параметр "креативности" модели. От 0 до 1).
             reasoning_effort: Уровень усилий на рассуждение для моделей o1 (low/medium/high).
+            tool_choice: Управление выбором инструмента ("auto", "none", имя функции или объект dict).
 
         Returns:
             LLMResponse, содержащий контент и/или вызовы инструментов.
@@ -302,7 +304,7 @@ class LiteLLMProvider(LLMProvider):
         # Добавляем к словарю запрос вызовы инструментов если есть
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
         try:
             # Отправляем запрос через метод LiteLLM
@@ -360,11 +362,20 @@ class LiteLLMProvider(LLMProvider):
             if isinstance(args, str):
                 args = json_repair.loads(args)
 
+            provider_specific_fields = (
+                getattr(tool_call, "provider_specific_fields", None) or None
+            )
+            function_provider_specific_fields = (
+                getattr(tool_call.function, "provider_specific_fields", None) or None
+            )
+
             tool_calls.append(
                 ToolCallRequest(
                     id=_short_tool_id(),
                     name=tool_call.function.name,
                     arguments=args,
+                    provider_specific_fields=provider_specific_fields,
+                    function_provider_specific_fields=function_provider_specific_fields,
                 )
             )
 

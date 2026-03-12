@@ -1,6 +1,7 @@
 """Базовый интерфейс поставщика LLM."""
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +16,25 @@ class ToolCallRequest:
     id: str
     name: str
     arguments: dict[str, Any]
+    provider_specific_fields: dict[str, Any] | None = None
+    function_provider_specific_fields: dict[str, Any] | None = None
+
+    def to_openai_tool_call(self) -> dict[str, Any]:
+        """Сериализовать в payload tool_call в стиле OpenAI."""
+        tool_call: dict[str, Any] = {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
+        if self.provider_specific_fields:
+            tool_call["provider_specific_fields"] = self.provider_specific_fields
+        if self.function_provider_specific_fields:
+            func: dict[str, Any] = tool_call["function"]
+            func["provider_specific_fields"] = self.function_provider_specific_fields
+        return tool_call
 
 
 @dataclass
@@ -32,6 +52,22 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         """Проверка, содержит ли ответ вызовы инструментов."""
         return len(self.tool_calls) > 0
+
+
+@dataclass(frozen=True)
+class GenerationSettings:
+    """Параметры генерации по умолчанию для вызовов LLM.
+
+    Сохраняются в провайдере, чтобы каждое место вызова наследует те же
+    значения по умолчанию без необходимости передавать temperature /
+    max_tokens / reasoning_effort через каждый слой. Отдельные места вызова
+    могут переопределять значения, передавая явные именованные аргументы
+    в chat() / chat_with_retry().
+    """
+
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    reasoning_effort: str | None = None
 
 
 class LLMProvider(ABC):
@@ -58,6 +94,8 @@ class LLMProvider(ABC):
         "temporarily unavailable",
     )
 
+    _SENTINEL = object()
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -65,6 +103,7 @@ class LLMProvider(ABC):
     ) -> None:
         self.api_key = api_key
         self.api_base = api_base
+        self.generation: GenerationSettings = GenerationSettings()
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -141,6 +180,7 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Отправить запрос на генерацию ответа.
@@ -152,6 +192,7 @@ class LLMProvider(ABC):
             max_tokens: Максимальное количество токенов в ответе.
             temperature: Температура семплинга (параметр "креативности" модели. От 0 до 1).
             reasoning_effort: Уровень усилий моделирования для моделей с расширенным рассуждением (o1, o3, DeepSeek-R1). Например: "low", "medium", "high".
+            tool_choice: Управление выбором инструмента ("auto", "none", имя функции или объект dict).
 
         Returns:
             LLMResponse, содержащий контент и/или вызовы инструментов.
@@ -168,20 +209,44 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
-        reasoning_effort: str | None = None,
+        max_tokens: object = _SENTINEL,
+        temperature: object = _SENTINEL,
+        reasoning_effort: object = _SENTINEL,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
-        """Вызвать chat() с повторными попытками при временных ошибках провайдера."""
+        """Вызвать chat() с повторными попытками при временных ошибках провайдера.
+
+        Параметры по умолчанию берутся из ``self.generation``, если не переданы
+        явно, чтобы вызывающим не нужно было передавать temperature / max_tokens /
+        reasoning_effort через каждый слой.
+        """
+        actual_max_tokens: int
+        actual_temperature: float
+        actual_reasoning_effort: str | None
+
+        if max_tokens is self._SENTINEL:
+            actual_max_tokens = self.generation.max_tokens
+        else:
+            actual_max_tokens = max_tokens  # type: ignore[assignment]
+        if temperature is self._SENTINEL:
+            actual_temperature = self.generation.temperature
+        else:
+            actual_temperature = temperature  # type: ignore[assignment]
+        if reasoning_effort is self._SENTINEL:
+            actual_reasoning_effort = self.generation.reasoning_effort
+        else:
+            actual_reasoning_effort = reasoning_effort  # type: ignore[assignment]
+
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
                 response = await self.chat(
                     messages=messages,
                     tools=tools,
                     model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
+                    max_tokens=actual_max_tokens,
+                    temperature=actual_temperature,
+                    reasoning_effort=actual_reasoning_effort,
+                    tool_choice=tool_choice,
                 )
             except asyncio.CancelledError:
                 raise
@@ -211,9 +276,10 @@ class LLMProvider(ABC):
                 messages=messages,
                 tools=tools,
                 model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
+                max_tokens=actual_max_tokens,
+                temperature=actual_temperature,
+                reasoning_effort=actual_reasoning_effort,
+                tool_choice=tool_choice,
             )
         except asyncio.CancelledError:
             raise
