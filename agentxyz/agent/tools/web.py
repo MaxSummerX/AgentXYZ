@@ -278,7 +278,7 @@ class WebSearchTool(Tool):
             logger.warning("DDGS search failed: {}", e)
             return None
 
-    async def _search_brave(self, query: str, max_results: int, **kwargs: Any) -> str:
+    async def _search_brave(self, query: str, max_results: int) -> str:
 
         try:
             logger.debug(

@@ -32,8 +32,9 @@ class HttpRequestTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Make HTTP requests with custom methods, headers, and body. "
-            "Supports GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS."
+            "Make HTTPS requests with custom methods, headers, and body. "
+            "Supports GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS. "
+            "Only https:// URLs are allowed for security."
         )
 
     @property
@@ -93,8 +94,8 @@ class HttpRequestTool(Tool):
         if domain_error:
             return domain_error
 
-        if not url.startswith(("http://", "https://")):
-            return "Error: URL must start with http:// or https://"
+        if not url.startswith("https://"):
+            return "Error: URL must use https:// for secure connections (http:// is not allowed)"
 
         method = method.upper()
         if method not in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]:
