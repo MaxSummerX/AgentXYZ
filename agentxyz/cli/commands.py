@@ -5,6 +5,7 @@ import os
 import select
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,8 +25,9 @@ if TYPE_CHECKING:
     from agentxyz.providers.litellm_provider import LiteLLMProvider
 
 import typer
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit import PromptSession, print_formatted_text
+from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
@@ -122,14 +124,60 @@ def _init_prompt_session() -> None:
     )
 
 
+def _make_console() -> Console:
+    return Console(file=sys.stdout)
+
+
+def _render_interactive_ansi(render_fn: Callable[[Console], None]) -> str:
+    """Рендерить вывод Rich в ANSI, чтобы prompt_toolkit мог безопасно его печатать."""
+    color_system: str | None = console.color_system or "standard"
+    ansi_console = Console(
+        force_terminal=True,
+        color_system=color_system,  # type: ignore[arg-type]
+        width=console.width,
+    )
+    with ansi_console.capture() as capture:
+        render_fn(ansi_console)
+    return capture.get()  # type: ignore[no-any-return]
+
+
 def _print_agent_response(response: str, render_markdown: bool) -> None:
     """Вывести ответ ассистента с единым стилем терминала."""
+    console = _make_console()
     content = response or ""
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
     console.print(f"[cyan]{__logo__} agentxyz[/cyan]")
     console.print(body)
     console.print()
+
+
+async def _print_interactive_line(text: str) -> None:
+    """Выводить асинхронные интерактивные обновления с безопасным для prompt_toolkit стилем Rich."""
+
+    def _write() -> None:
+        ansi = _render_interactive_ansi(lambda c: c.print(f"  [dim]↳ {text}[/dim]"))
+        print_formatted_text(ANSI(ansi), end="")
+
+    await run_in_terminal(_write)
+
+
+async def _print_interactive_response(response: str, render_markdown: bool) -> None:
+    """Выводить асинхронные интерактивные ответы с безопасным для prompt_toolkit стилем Rich."""
+
+    def _write() -> None:
+        content = response or ""
+
+        def _render(c: Console) -> None:
+            c.print()
+            c.print(f"[cyan]{__logo__} nanobot[/cyan]")
+            c.print(Markdown(content) if render_markdown else Text(content))
+            c.print()
+
+        ansi = _render_interactive_ansi(_render)
+        print_formatted_text(ANSI(ansi), end="")
+
+    await run_in_terminal(_write)
 
 
 def _is_exit_command(command: str) -> bool:
@@ -710,14 +758,15 @@ def agent(
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
-                                console.print(f"  [dim]↳ {msg.content}[/dim]")
+                                await _print_interactive_line(msg.content)
                         elif not turn_done.is_set():
                             if msg.content:
                                 turn_response.append(msg.content)
                             turn_done.set()
                         elif msg.content:
-                            console.print()
-                            _print_agent_response(msg.content, render_markdown=markdown)
+                            await _print_interactive_response(
+                                msg.content, render_markdown=markdown
+                            )
                     except TimeoutError:
                         continue
                     except asyncio.CancelledError:
