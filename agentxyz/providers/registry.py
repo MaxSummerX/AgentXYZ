@@ -265,6 +265,23 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
+    # === Ollama (локальный, OpenAI-совместимый) ===================================
+    ProviderSpec(
+        name="ollama",
+        keywords=("ollama", "nemotron"),
+        env_key="OLLAMA_API_KEY",
+        display_name="Ollama",
+        litellm_prefix="ollama_chat",  # model → ollama_chat/model
+        skip_prefixes=("ollama/", "ollama_chat/"),
+        env_extras=(),
+        is_gateway=False,
+        is_local=True,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="11434",
+        default_api_base="http://localhost:11434",
+        strip_model_prefix=False,
+        model_overrides=(),
+    ),
     # === Локальное развёртывание (сопоставляется по ключу конфигурации, НЕ по api_base) =========
     # vLLM / любой локальный сервер, совместимый с OpenAI.
     # Определяется, когда ключ конфигурации — "vllm" (provider_name="vllm").
