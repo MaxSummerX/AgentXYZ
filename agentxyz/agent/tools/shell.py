@@ -42,6 +42,9 @@ class ExecTool(Tool):
     def name(self) -> str:
         return "exec"
 
+    _MAX_TIMEOUT = 600
+    _MAX_OUTPUT = 10_000
+
     @property
     def description(self) -> str:
         return "Execute a shell command and return its output. Use with caution."
@@ -59,17 +62,32 @@ class ExecTool(Tool):
                     "type": "string",
                     "description": "Optional working directory for the command",
                 },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "Timeout in seconds. Increase for long-running commands "
+                        "like compilation or installation (default 60, max 600)."
+                    ),
+                    "minimum": 1,
+                    "maximum": 600,
+                },
             },
             "required": ["command"],
         }
 
     async def execute(  # type: ignore[override]
-        self, command: str, working_dir: str | None = None, **kwargs: Any
+        self,
+        command: str,
+        working_dir: str | None = None,
+        timeout: int | None = None,  # noqa: ASYNC109
+        **kwargs: Any,
     ) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
+
+        effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
 
         env = os.environ.copy()
         if self.path_append:
@@ -86,7 +104,8 @@ class ExecTool(Tool):
 
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=self.timeout
+                    process.communicate(),
+                    timeout=effective_timeout,
                 )
             except TimeoutError:
                 process.kill()
@@ -96,7 +115,7 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except TimeoutError:
                     pass
-                return f"Error: Command timed out after {self.timeout} seconds"
+                return f"Error: Command timed out after {effective_timeout} seconds"
 
             output_parts = []
 
@@ -114,11 +133,13 @@ class ExecTool(Tool):
             result = "\n".join(output_parts) if output_parts else "(no output)"
 
             # Обрезать очень длинный вывод
-            max_len = 10000
+            max_len = self._MAX_OUTPUT
             if len(result) > max_len:
+                half = max_len // 2
                 result = (
-                    result[:max_len]
-                    + f"\n... (truncated, {len(result) - max_len} more chars)"
+                    result[:half]
+                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
+                    + result[-half:]
                 )
 
             return result
@@ -149,7 +170,8 @@ class ExecTool(Tool):
 
             for raw in self._extract_absolute_paths(cmd):
                 try:
-                    p = Path(raw.strip()).resolve()
+                    expanded = os.path.expandvars(raw.strip())
+                    p = Path(expanded).expanduser().resolve()
                 except Exception:
                     continue
                 if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
@@ -161,6 +183,9 @@ class ExecTool(Tool):
     def _extract_absolute_paths(command: str) -> list[str]:
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)  # Windows: C:\...
         posix_paths = re.findall(
-            r"(?:^|[\s|>])(/[^\s\"'>]+)", command
+            r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command
         )  # POSIX: /absolute only
-        return win_paths + posix_paths
+        home_paths = re.findall(
+            r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command
+        )  # POSIX/Windows home shortcut: ~
+        return win_paths + posix_paths + home_paths
