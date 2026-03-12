@@ -176,11 +176,11 @@ class ProvidersConfig(Base):
     zai: ProviderConfig = Field(default_factory=ProviderConfig)
     dashscope: ProviderConfig = Field(default_factory=ProviderConfig)
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)
-    ollama: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class WebSearchConfig(Base):
@@ -287,12 +287,25 @@ class Config(BaseSettings):
 
         # Запасной вариант: настроенные локальные провайдеры могут маршрутизировать
         # модели без специфичных ключей провайдера (например, "llama3.2" на Ollama).
+        # Предпочитать провайдеры, у которых detect_by_base_keyword совпадает с настроенным api_base
+        # (например, "11434" для Ollama в "http://localhost:11434"), а не просто порядок реестра.
+        local_fallback: tuple[ProviderConfig, str] | None = None
         for spec in PROVIDERS:
             if not spec.is_local:
                 continue
             p = getattr(self.providers, spec.name, None)
-            if p and p.api_base:
+            if not (p and p.api_base):
+                continue
+            if (
+                spec.detect_by_base_keyword
+                and spec.detect_by_base_keyword in p.api_base
+            ):
                 return p, spec.name
+            if local_fallback is None:
+                local_fallback = (p, spec.name)
+        if local_fallback:
+            return local_fallback
+
         return None, None
 
     def get_provider(self, model: str | None = None) -> ProviderConfig | None:
