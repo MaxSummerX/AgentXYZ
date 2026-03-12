@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import aiofiles
 from loguru import logger
-from telegram import BotCommand, ReplyParameters, Update
+from telegram import BotCommand, Message, ReplyParameters, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,7 +22,6 @@ from telegram.request import HTTPXRequest
 
 from agentxyz.channels.base import BaseChannel
 from agentxyz.config.paths import get_media_dir
-from agentxyz.config.schema import TranscriptionConfig
 from agentxyz.utils.helpers import split_message
 
 
@@ -32,6 +31,9 @@ if TYPE_CHECKING:
     from agentxyz.config.schema import TelegramConfig
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Лимит символов сообщения Telegram
+TELEGRAM_REPLY_CONTEXT_MAX_LEN = (
+    TELEGRAM_MAX_MESSAGE_LEN  # Макс. длина контекста ответа в сообщении пользователя
+)
 
 
 def _strip_md(s: str) -> str:
@@ -171,21 +173,17 @@ class TelegramChannel(BaseChannel):
     """
 
     name = "telegram"
-
+    display_name = "Telegram"
     # Команды, зарегистрированные в меню команд Telegram
     BOT_COMMANDS: ClassVar[list[BotCommand]] = [
         BotCommand("start", "Запустить бота"),
         BotCommand("new", "Начать новый диалог"),
         BotCommand("stop", "Прекратить текущую задачу"),
         BotCommand("help", "Показать доступные команды"),
+        BotCommand("restart", "Перезапустить бота"),
     ]
 
-    def __init__(
-        self,
-        config: TelegramConfig,
-        bus: MessageBus,
-        transcription_config: TranscriptionConfig | None = None,
-    ):
+    def __init__(self, config: TelegramConfig, bus: MessageBus):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self._app: Application | None = None
@@ -196,7 +194,6 @@ class TelegramChannel(BaseChannel):
         self._media_group_buffers: dict[str, dict] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
         self._message_threads: dict[tuple[str, int], int] = {}
-        self.transcription_config = transcription_config or TranscriptionConfig()
         self._bot_user_id: int | None = None
         self._bot_username: str | None = None
 
@@ -249,6 +246,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
+        self._app.add_handler(CommandHandler("restart", self._forward_command))
 
         # Добавить обработчик сообщений для текста, фото, голоса, документов
         self._app.add_handler(
@@ -522,6 +520,7 @@ class TelegramChannel(BaseChannel):
     @staticmethod
     def _build_message_metadata(message: Any, user: Any) -> dict:
         """Создаёт общую структуру метаданных для входящих сообщений Telegram."""
+        reply_to = getattr(message, "reply_to_message", None)
         return {
             "message_id": message.message_id,
             "user_id": user.id,
@@ -530,7 +529,76 @@ class TelegramChannel(BaseChannel):
             "is_group": message.chat.type != "private",
             "message_thread_id": getattr(message, "message_thread_id", None),
             "is_forum": bool(getattr(message.chat, "is_forum", False)),
+            "reply_to_message_id": getattr(reply_to, "message_id", None)
+            if reply_to
+            else None,
         }
+
+    @staticmethod
+    def _extract_reply_context(message: Message) -> str | None:
+        """Извлечь текст из сообщения, на которое отвечают, если есть."""
+        reply = getattr(message, "reply_to_message", None)
+        if not reply:
+            return None
+        text = getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
+        if len(text) > TELEGRAM_REPLY_CONTEXT_MAX_LEN:
+            text = text[:TELEGRAM_REPLY_CONTEXT_MAX_LEN] + "..."
+        return f"[Reply to: {text}]" if text else None
+
+    async def _download_message_media(
+        self, msg: Message, *, add_failure_content: bool = False
+    ) -> tuple[list[str], list[str]]:
+        """Загрузить медиа из сообщения (текущего или ответа). Возвращает (media_paths, content_parts)."""
+        media_file: Any = None
+        media_type: str | None = None
+        if getattr(msg, "photo", None):
+            media_file = msg.photo[-1]
+            media_type = "image"
+        elif getattr(msg, "voice", None):
+            media_file = msg.voice
+            media_type = "voice"
+        elif getattr(msg, "audio", None):
+            media_file = msg.audio
+            media_type = "audio"
+        elif getattr(msg, "document", None):
+            media_file = msg.document
+            media_type = "file"
+        elif getattr(msg, "video", None):
+            media_file = msg.video
+            media_type = "video"
+        elif getattr(msg, "video_note", None):
+            media_file = msg.video_note
+            media_type = "video"
+        elif getattr(msg, "animation", None):
+            media_file = msg.animation
+            media_type = "animation"
+        if not media_file or not self._app:
+            return [], []
+        # Assert media_type is not None since media_file is not None
+        assert media_type is not None
+        try:
+            file = await self._app.bot.get_file(media_file.file_id)
+            ext = self._get_extension(
+                media_type,
+                getattr(media_file, "mime_type", None),
+                getattr(media_file, "file_name", None),
+            )
+            media_dir = get_media_dir("telegram")
+            file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
+            await file.download_to_drive(str(file_path))
+            path_str = str(file_path)
+            if media_type in ("voice", "audio"):
+                transcription = await self.transcribe_audio(file_path)
+                if transcription:
+                    logger.info("Transcribed {}: {}...", media_type, transcription[:50])
+                    return [path_str], [f"[transcription: {transcription}]"]
+                return [path_str], [f"[{media_type}: {path_str}]"]
+            return [path_str], [f"[{media_type}: {path_str}]"]
+        except Exception as e:
+            logger.warning("Failed to download message media: {}", e)
+            if add_failure_content:
+                return [], [f"[{media_type}: download failed]"]
+            return [], []
 
     async def _ensure_bot_identity(self) -> tuple[int | None, str | None]:
         """Загрузить данные бота один раз и переиспользовать для проверок упоминаний и ответов."""
@@ -626,7 +694,7 @@ class TelegramChannel(BaseChannel):
         await self._handle_message(
             sender_id=self._sender_id(user),
             chat_id=str(message.chat_id),
-            content=message.text,
+            content=message.text or "",
             metadata=self._build_message_metadata(message, user),
             session_key=self._derive_topic_session_key(message),
         )
@@ -660,85 +728,28 @@ class TelegramChannel(BaseChannel):
         if message.caption:
             content_parts.append(message.caption)
 
-        # Обработка медиафайлов
-        media_file: Any = None
-        media_type: str | None = None
+        # Загрузить медиа из текущего сообщения
+        current_media_paths, current_media_parts = await self._download_message_media(
+            message, add_failure_content=True
+        )
+        media_paths.extend(current_media_paths)
+        content_parts.extend(current_media_parts)
+        if current_media_paths:
+            logger.debug("Загружено медиа сообщения в {}", current_media_paths[0])
 
-        if message.photo:
-            media_file = message.photo[-1]  # Крупнейшее фото
-            media_type = "image"
-        elif message.voice:
-            media_file = message.voice
-            media_type = "voice"
-        elif message.audio:
-            media_file = message.audio
-            media_type = "audio"
-        elif message.document:
-            media_file = message.document
-            media_type = "file"
-
-        # Скачать медиа если есть
-        if media_file and self._app:
-            try:
-                file = await self._app.bot.get_file(media_file.file_id)
-                ext = self._get_extension(
-                    media_type or "",
-                    getattr(media_file, "mime_type", None),
-                    getattr(media_file, "file_name", None),
-                )
-                media_dir = get_media_dir("telegram")
-
-                file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
-                logger.info("Скачивание в {}...", file_path)
-                await file.download_to_drive(str(file_path))
-                logger.info(
-                    "Успешно загружен {} в {} (размер: {} bytes)",
-                    media_type,
-                    file_path,
-                    file_path.stat().st_size if file_path.exists() else "N/A",
-                )
-
-                media_paths.append(str(file_path))
-
-                # Обработка транскрипции голоса
-                if media_type == "voice" or media_type == "audio":
-                    if self.transcription_config.provider == "whisper":
-                        from agentxyz.providers.transcription import (
-                            WhisperTranscriptionProvider,
-                        )
-
-                        whisper_transcriber = WhisperTranscriptionProvider(
-                            model_size=self.transcription_config.whisper_model,
-                            device=self.transcription_config.whisper_device,
-                            language=self.transcription_config.language,
-                        )
-                        transcription = await whisper_transcriber.transcribe(file_path)
-                    else:
-                        transcription = None
-
-                    if transcription:
-                        logger.info(
-                            "Транскрипция {}: {}...", media_type, transcription[:50]
-                        )
-                        content_parts.append(f"[транскрипция: {transcription}]")
-                    else:
-                        content_parts.append(f"[{media_type}: {file_path}]")
-                else:
-                    content_parts.append(f"[{media_type}: {file_path}]")
-
-                logger.debug("Загружен {} в {}", media_type, file_path)
-            except Exception as e:
-                import traceback
-
-                logger.error(
-                    "[DEBUG] Ошибка загрузки медиа: type={}, file_id={}, error={}, traceback={}",
-                    media_type,
-                    getattr(media_file, "file_id", "N/A")[:20],
-                    str(e),
-                    traceback.format_exc()[-500:],
-                )
-
-                content_parts.append(f"[{media_type}: загрузка неудачна]")
+        # Контекст ответа: текст и/или медиа из сообщения, на которое отвечаем
+        reply = getattr(message, "reply_to_message", None)
+        if reply is not None:
+            reply_ctx = self._extract_reply_context(message)
+            reply_media, reply_media_parts = await self._download_message_media(reply)
+            if reply_media:
+                media_paths = reply_media + media_paths
+                logger.debug("Прикреплено медиа ответа: {}", reply_media[0])
+            tag = reply_ctx or (
+                f"[Reply to: {reply_media_parts[0]}]" if reply_media_parts else None
+            )
+            if tag:
+                content_parts.insert(0, tag)
 
         content = "\n".join(content_parts) if content_parts else "[пустое сообщение]"
 

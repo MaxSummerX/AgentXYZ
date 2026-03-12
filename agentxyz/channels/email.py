@@ -35,6 +35,7 @@ class EmailChannel(BaseChannel):
     """
 
     name = "email"
+    display_name = "Email"
     _IMAP_MONTHS = (
         "Jan",
         "Feb",
@@ -264,7 +265,7 @@ class EmailChannel(BaseChannel):
                 return messages
 
             ids = data[0].split()
-            if limit > 0 and len(ids) > limit:
+            if 0 < limit < len(ids):
                 ids = ids[-limit:]
             for imap_id in ids:
                 status, fetched = client.fetch(imap_id, "(BODY.PEEK[] UID)")

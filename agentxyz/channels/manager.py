@@ -42,34 +42,23 @@ class ChannelManager:
         self._init_channels()
 
     def _init_channels(self) -> None:
-        """Инициализация каналов на основе конфигурации."""
+        """Инициализировать каналы, обнаруженные через pkgutil scan."""
+        from agentxyz.channels.registry import (
+            discover_channel_names,
+            load_channel_class,
+        )
 
-        # Канал Telegram
-        if self.config.channels.telegram.enabled:
+        for modname in discover_channel_names():
+            section = getattr(self.config.channels, modname, None)
+            if not section or not getattr(section, "enabled", False):
+                continue
             try:
-                from agentxyz.channels.telegram import (
-                    TelegramChannel,  # type: ignore[misc]
-                )
-
-                self.channels["telegram"] = TelegramChannel(
-                    self.config.channels.telegram,
-                    self.bus,
-                )
-                logger.info("Telegram канал включён")
+                cls = load_channel_class(modname)
+                channel = cls(section, self.bus)
+                self.channels[modname] = channel
+                logger.info("{} channel enabled", cls.display_name)
             except ImportError as e:
-                logger.warning("Telegram канал недоступен: {}", e)
-
-        # Канал Email
-        if self.config.channels.email.enabled:
-            try:
-                from agentxyz.channels.email import EmailChannel  # type: ignore[misc]
-
-                self.channels["email"] = EmailChannel(
-                    self.config.channels.email, self.bus
-                )
-                logger.info("Email канал включён")
-            except ImportError as e:
-                logger.warning("Email канал недоступен: {}", e)
+                logger.warning("{} channel not available: {}", modname, e)
 
         self._validate_allow_from()
 
