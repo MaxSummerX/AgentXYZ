@@ -115,12 +115,22 @@ class AgentDefaults(Base):
     model: str = "anthropic/claude-opus-4-6"
     provider: str = "auto"  # Название провайдера (например, "anthropic", "openrouter") или "auto" для автоматического определения
     max_tokens: int = 8192
-    temperature: float = 0.2
+    context_window_tokens: int = 65_536
+    temperature: float = 0.1
     max_tool_iterations: int = 40
-    memory_window: int = 100
+    # Устаревшее поле совместимости: принимается из старых конфигов, но игнорируется во время выполнения.
+    memory_window: int | None = Field(default=None, exclude=True)
     reasoning_effort: str | None = (
         None  # low / medium / high — включает режим мышления LLM
     )
+
+    @property
+    def should_warn_deprecated_memory_window(self) -> bool:
+        """Возвращает True, когда старое memoryWindow присутствует без contextWindowTokens."""
+        return (
+            self.memory_window is not None
+            and "context_window_tokens" not in self.model_fields_set
+        )
 
 
 class AgentsConfig(Base):
@@ -170,6 +180,7 @@ class ProvidersConfig(Base):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class WebSearchConfig(Base):
@@ -264,20 +275,23 @@ class Config(BaseSettings):
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and model_prefix and normalized_prefix == spec.name:
-                if p.api_key:
+                if spec.is_local or p.api_key:
                     return p, spec.name
 
         # Сопоставление по ключевому слову (порядок следует реестру PROVIDERS)
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and any(_kw_matches(kw) for kw in spec.keywords):
-                if p.api_key:
+                if spec.is_local or p.api_key:
                     return p, spec.name
 
-        # Fallback: сначала шлюзы, затем другие (следует порядку реестра)
+        # Запасной вариант: настроенные локальные провайдеры могут маршрутизировать
+        # модели без специфичных ключей провайдера (например, "llama3.2" на Ollama).
         for spec in PROVIDERS:
+            if not spec.is_local:
+                continue
             p = getattr(self.providers, spec.name, None)
-            if p and p.api_key:
+            if p and p.api_base:
                 return p, spec.name
         return None, None
 
@@ -297,7 +311,7 @@ class Config(BaseSettings):
         return p.api_key if p else None
 
     def get_api_base(self, model: str | None = None) -> str | None:
-        """Получить базовый URL API для указанной модели. Применяет URL-адреса по умолчанию для известных шлюзов."""
+        """Получить базовый URL API для указанной модели. Применяет URL по умолчанию для шлюзов/локальных провайдеров."""
         from agentxyz.providers.registry import find_by_name
 
         p, name = self._match_provider(model)
@@ -308,7 +322,7 @@ class Config(BaseSettings):
         # чтобы избежать загрязнения глобального litellm.api_base.
         if name:
             spec = find_by_name(name)
-            if spec and spec.is_gateway and spec.default_api_base:
+            if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
                 return spec.default_api_base
         return None
 
