@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import weakref
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -65,13 +68,30 @@ def _normalize_save_memory_args(args: Any) -> dict[str, Any] | None:
     return args if isinstance(args, dict) else None
 
 
+_TOOL_CHOICE_ERROR_MARKERS = (
+    "tool_choice",
+    "toolchoice",
+    "does not support",
+    'should be ["none", "auto"]',
+)
+
+
+def _is_tool_choice_unsupported(content: str | None) -> bool:
+    """Определяет ошибки провайдера, вызванные неподдерживаемым принудительным tool_choice."""
+    text = (content or "").lower()
+    return any(m in text for m in _TOOL_CHOICE_ERROR_MARKERS)
+
+
 class MemoryStore:
     """Двухуровневая память: MEMORY.md (долгосрочные факты) + HISTORY.md (лог, доступный для поиска через grep)."""
+
+    _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
+        self._consecutive_failures = 0
 
     def read_long_term(self) -> str:
         """Прочитать долгосрочную память (MEMORY.md)."""
@@ -133,38 +153,100 @@ class MemoryStore:
             },
             {"role": "user", "content": prompt},
         ]
+
         try:
+            forced = {"type": "function", "function": {"name": "save_memory"}}
             response = await provider.chat_with_retry(
                 messages=chat_messages,
                 tools=_SAVE_MEMORY_TOOL,
                 model=model,
-                tool_choice={"type": "function", "function": {"name": "save_memory"}},
+                tool_choice=forced,
             )
+
+            if response.finish_reason == "error" and _is_tool_choice_unsupported(
+                response.content
+            ):
+                logger.warning(
+                    "Принудительный tool_choice не поддерживается, повторная попытка с auto"
+                )
+                response = await provider.chat_with_retry(
+                    messages=chat_messages,
+                    tools=_SAVE_MEMORY_TOOL,
+                    model=model,
+                    tool_choice="auto",
+                )
 
             if not response.has_tool_calls:
                 logger.warning(
                     "Консолидация памяти: LLM не вызвал save_memory, пропуск"
+                    "(finish_reason={}, content_len={}, content_preview={})",
+                    response.finish_reason,
+                    len(response.content or ""),
+                    (response.content or "")[:200],
                 )
-                return False
+                return self._fail_or_raw_archive(messages)
 
             args = _normalize_save_memory_args(response.tool_calls[0].arguments)
             if args is None:
                 logger.warning("Консолидация памяти: неожиданные аргументы save_memory")
-                return False
+                return self._fail_or_raw_archive(messages)
 
-            if entry := args.get("history_entry"):
-                self.append_history(_ensure_text(entry))
-            if update := args.get("memory_update"):
-                update = _ensure_text(update)
-                if update != current_memory:
-                    self.write_long_term(update)
+            if "history_entry" not in args or "memory_update" not in args:
+                logger.warning(
+                    "Консолидация памяти: в полезной нагрузке save_memory отсутствуют обязательные поля"
+                )
+                return self._fail_or_raw_archive(messages)
+
+            entry = args["history_entry"]
+            update = args["memory_update"]
+
+            if entry is None or update is None:
+                logger.warning(
+                    "Консолидация памяти: в полезной нагрузке save_memory обязательные поля равны null"
+                )
+                return self._fail_or_raw_archive(messages)
+
+            entry = _ensure_text(entry).strip()
+
+            if not entry:
+                logger.warning(
+                    "Консолидация памяти: history_entry пустой после нормализации"
+                )
+                return self._fail_or_raw_archive(messages)
+
+            self.append_history(entry)
+            update = _ensure_text(update)
+            if update != current_memory:
+                self.write_long_term(update)
+
+            self._consecutive_failures = 0
 
             logger.info("Консолидация памяти завершена для {} сообщений", len(messages))
             return True
 
         except Exception:
             logger.exception("Ошибка консолидации памяти")
+            return self._fail_or_raw_archive(messages)
+
+    def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
+        """Увеличивает счётчик ошибок; после порога архивирует необработанные сообщения и возвращает True."""
+        self._consecutive_failures += 1
+        if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
             return False
+        self._raw_archive(messages)
+        self._consecutive_failures = 0
+        return True
+
+    def _raw_archive(self, messages: list[dict]) -> None:
+        """Резервный вариант: сохраняет необработанные сообщения в HISTORY.md без суммаризации с помощью LLM."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.append_history(
+            f"[{ts}] [RAW] {len(messages)} messages\n{self._format_messages(messages)}"
+        )
+        logger.warning(
+            "Консолидация памяти ухудшена: заархивировано необработанных сообщений: {}",
+            len(messages),
+        )
 
 
 class MemoryConsolidator:
