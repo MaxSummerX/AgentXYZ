@@ -65,6 +65,8 @@ class LiteLLMProvider(LLMProvider):
         # Отбрасывать неподдерживаемые параметры для провайдеров (например, gpt-5 отклоняет некоторые параметры)
         litellm.drop_params = True
 
+        self._langsmith_enabled = bool(os.getenv("LANGSMITH_API_KEY"))
+
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Установить переменные окружения на основе обнаруженного провайдера."""
         spec = self._gateway or find_by_model(model)
@@ -284,6 +286,9 @@ class LiteLLMProvider(LLMProvider):
 
         # Применить переопределения для конкретной модели (например, температура для kimi-k2.5)
         self._apply_model_overrides(model, kwargs)
+
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
 
         # Передавать api_key напрямую — надёжнее, чем только переменные окружения
         if self.api_key:
