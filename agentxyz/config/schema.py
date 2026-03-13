@@ -186,7 +186,9 @@ class ProvidersConfig(Base):
 class WebSearchConfig(Base):
     """Конфигурация веб-поиска."""
 
+    provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina
     api_key: str = ""  # API-ключ Brave Search
+    base_url: str = ""  # SearXNG base URL
     max_results: int = 5
 
 
