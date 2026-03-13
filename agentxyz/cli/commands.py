@@ -170,7 +170,7 @@ async def _print_interactive_response(response: str, render_markdown: bool) -> N
 
         def _render(c: Console) -> None:
             c.print()
-            c.print(f"[cyan]{__logo__} nanobot[/cyan]")
+            c.print(f"[cyan]{__logo__} agentxyz[/cyan]")
             c.print(Markdown(content) if render_markdown else Text(content))
             c.print()
 
@@ -424,7 +424,7 @@ def gateway(
         model=loaded_config.agents.defaults.model,
         max_iterations=loaded_config.agents.defaults.max_tool_iterations,
         context_window_tokens=loaded_config.agents.defaults.context_window_tokens,
-        brave_api_key=loaded_config.tools.web.search.api_key or None,
+        web_search_config=loaded_config.tools.web.search,
         web_proxy=loaded_config.tools.web.proxy or None,
         exec_config=loaded_config.tools.exec,
         cron_service=cron,
@@ -670,7 +670,7 @@ def agent(
         model=loaded_config.agents.defaults.model,
         max_iterations=loaded_config.agents.defaults.max_tool_iterations,
         context_window_tokens=loaded_config.agents.defaults.context_window_tokens,
-        brave_api_key=loaded_config.tools.web.search.api_key or None,
+        web_search_config=loaded_config.tools.web.search,
         web_proxy=loaded_config.tools.web.proxy or None,
         exec_config=loaded_config.tools.exec,
         cron_service=cron,
@@ -680,21 +680,33 @@ def agent(
     )
 
     # Показывать спиннер, когда журналы отключены (нет вывода, который можно пропустить); пропускать, когда журналы включены
+    _status_context: Any = None
+
     def _thinking_ctx() -> Any:
+        nonlocal _status_context
         if logs:
             from contextlib import nullcontext
 
             return nullcontext()
         # Анимированный спиннер безопасно использовать с обработкой ввода prompt_toolkit
-        return console.status("[dim]agentxyz думает...[/dim]", spinner="dots")
+        _status_context = console.status(
+            "[dim]agentxyz думает...[/dim]", spinner="dots"
+        )
+        return _status_context
 
     async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        nonlocal _status_context
         ch = agent_loop.channels_config
         if ch and tool_hint and not ch.send_tool_hints:
             return
         if ch and not tool_hint and not ch.send_progress:
             return
-        console.print(f"  [dim]↳ {content}[/dim]")
+        if _status_context is not None:
+            _status_context.update(
+                f"[dim]agentxyz думает...[/dim]\n  [dim]↳ {content}[/dim]"
+            )
+        else:
+            console.print(f"  [dim]↳ {content}[/dim]")
 
     if message:
         # Режим одного сообщения — прямой вызов, без шины
