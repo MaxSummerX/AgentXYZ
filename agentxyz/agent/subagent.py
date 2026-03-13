@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -19,12 +19,13 @@ from agentxyz.agent.tools.shell import ExecTool
 from agentxyz.agent.tools.web import WebFetchTool, WebSearchTool
 from agentxyz.bus.events import InboundMessage
 from agentxyz.bus.queue import MessageBus
+from agentxyz.config.schema import ExecToolConfig, WebSearchConfig
 from agentxyz.providers.base import LLMProvider
 from agentxyz.utils.helpers import build_assistant_message
 
 
-if TYPE_CHECKING:
-    from agentxyz.config.schema import ExecToolConfig
+# if TYPE_CHECKING:
+#     from agentxyz.config.schema import ExecToolConfig
 
 
 class SubagentManager:
@@ -42,18 +43,18 @@ class SubagentManager:
         workspace: Path,
         bus: MessageBus,
         model: str | None = None,
-        brave_api_key: str | None = None,
+        web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
+        exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
     ):
-        from agentxyz.config.schema import ExecToolConfig
+        from agentxyz.config.schema import ExecToolConfig, WebSearchConfig
 
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
         self.model = model or provider.get_default_model()
-        self.brave_api_key = brave_api_key
+        self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
@@ -83,13 +84,8 @@ class SubagentManager:
         """
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
+        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 
-        origin = {
-            "channel": origin_channel,
-            "chat_id": origin_chat_id,
-        }
-
-        # Создать фоновую задачу
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin)
         )
@@ -140,13 +136,16 @@ class SubagentManager:
                     working_dir=str(self.workspace),
                     timeout=self.exec_config.timeout,
                     restrict_to_workspace=self.restrict_to_workspace,
+                    path_append=self.exec_config.path_append,
                 )
             )
-            tools.register(WebSearchTool(proxy=self.web_proxy))
+            tools.register(
+                WebSearchTool(config=self.web_search_config, proxy=self.web_proxy)
+            )
             tools.register(WebFetchTool(proxy=self.web_proxy))
 
             # Построить сообщения со специфическим промптом субагента
-            system_prompt = self._build_subagent_prompt(task)
+            system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -206,7 +205,7 @@ class SubagentManager:
                     break
 
             if final_result is None:
-                final_result = "task completed but no final response was generated."
+                final_result = "Task completed but no final response was generated."
 
             logger.info("Субагент [{}] успешно завершён", task_id)
             await self._announce_result(
@@ -257,7 +256,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             origin["chat_id"],
         )
 
-    def _build_subagent_prompt(self, task: str) -> str:
+    def _build_subagent_prompt(self) -> str:
         """Построить сфокусированный системный промпт для субагента."""
         from agentxyz.agent.context import ContextBuilder
         from agentxyz.agent.skills import SkillsLoader

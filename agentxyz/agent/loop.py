@@ -29,7 +29,7 @@ from agentxyz.agent.tools.spawn import SpawnTool
 from agentxyz.agent.tools.web import WebFetchTool, WebSearchTool
 from agentxyz.bus.events import InboundMessage, OutboundMessage
 from agentxyz.bus.queue import MessageBus
-from agentxyz.config.schema import ChannelsConfig, ExecToolConfig
+from agentxyz.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
 from agentxyz.cron.service import CronService
 from agentxyz.providers.base import LLMProvider
 from agentxyz.session.manager import Session, SessionManager
@@ -57,7 +57,7 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int = 40,
         context_window_tokens: int = 65_536,
-        brave_api_key: str | None = None,
+        web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
@@ -66,7 +66,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):
-        from agentxyz.config.schema import ExecToolConfig
+        from agentxyz.config.schema import ExecToolConfig, WebSearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -75,7 +75,7 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
-        self.brave_api_key = brave_api_key
+        self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -89,7 +89,7 @@ class AgentLoop:
             workspace=workspace,
             bus=bus,
             model=self.model,
-            brave_api_key=brave_api_key,
+            web_search_config=self.web_search_config,
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
@@ -131,7 +131,9 @@ class AgentLoop:
         )
 
         # Веб-инструменты
-        self.tools.register(WebSearchTool(proxy=self.web_proxy))
+        self.tools.register(
+            WebSearchTool(config=self.web_search_config, proxy=self.web_proxy)
+        )
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
 
         # Инструмент сообщений
@@ -159,7 +161,7 @@ class AgentLoop:
             await self._mcp_stack.__aenter__()
             await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
             self._mcp_connected = True
-        except Exception as e:
+        except BaseException as e:
             logger.error(
                 "Не удалось подключиться к MCP-серверам (повторная попытка при следующем сообщении): {}",
                 e,
@@ -366,7 +368,9 @@ class AgentLoop:
 
         async def _do_restart() -> None:
             await asyncio.sleep(1)
-            os.execv(sys.executable, [sys.executable, *sys.argv])
+            # Используйте -m agentxyz вместо sys.argv[0] для совместимости с Windows
+            # (sys.argv[0] может быть просто "agentxyz" без полного пути в Windows)
+            os.execv(sys.executable, [sys.executable, "-m", "agentxyz", *sys.argv[1:]])
 
         task = asyncio.create_task(_do_restart())
         self._background_tasks.add(task)
