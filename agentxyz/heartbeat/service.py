@@ -147,6 +147,8 @@ class HeartbeatService:
 
     async def _tick(self) -> None:
         """Выполнить один тик сервиса heartbeat."""
+        from agentxyz.utils.evaluator import evaluate_response
+
         content = self._read_heartbeat_file()
 
         # Пропуск, если HEARTBEAT.md пуст или не существует
@@ -168,9 +170,19 @@ class HeartbeatService:
 
             if self.on_execute:
                 response = await self.on_execute(tasks)
-                if response and self.on_notify:
-                    logger.info("Heartbeat: завершено, доставка ответа")
-                    await self.on_notify(response)
+
+                if response:
+                    should_notify = await evaluate_response(
+                        response,
+                        tasks,
+                        self.provider,
+                        self.model,
+                    )
+                    if should_notify and self.on_notify:
+                        logger.info("Heartbeat: завершено, доставка ответа")
+                        await self.on_notify(response)
+                    else:
+                        logger.info("Heartbeat: подавлен пост-оценкой")
         except Exception:
             logger.exception("Сбой выполнения Heartbeat")
 
