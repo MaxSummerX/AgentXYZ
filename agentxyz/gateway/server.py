@@ -398,10 +398,10 @@ class GatewayServer:
         enabled_channels = [
             name
             for name, config in [
-                ("telegram", self._root_config.channels.telegram),
-                ("email", self._root_config.channels.email),
+                ("telegram", getattr(self._root_config.channels, "telegram", None)),
+                ("email", getattr(self._root_config.channels, "email", None)),
             ]
-            if getattr(config, "enabled", False)
+            if config is not None and getattr(config, "enabled", False)
         ]
 
         return {
