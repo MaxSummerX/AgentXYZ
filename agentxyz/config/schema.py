@@ -14,61 +14,6 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class TelegramConfig(Base):
-    """Конфигурация канала Telegram."""
-
-    enabled: bool = False
-    token: str = ""  # Токен бота от @BotFather
-    allow_from: list[str] = Field(
-        default_factory=list
-    )  # Разрешенные ID пользователей или имена пользователей
-    proxy: str | None = (
-        None  # HTTP/SOCKS5 прокси URL, например "http://127.0.0.1:7890" или "socks5://127.0.0.1:1080
-    )
-    reply_to_message: bool = (
-        False  # Если true, ответы бота цитируют исходное сообщение"
-    )
-    group_policy: Literal["open", "mention"] = (
-        "mention"  # "mention" отвечает когда бота упоминают или отвечают на его сообщение, "open" отвечает на все сообщения
-    )
-
-
-class EmailConfig(Base):
-    """Конфигурация канала электронной почты (IMAP входящие + SMTP исходящие)."""
-
-    enabled: bool = False
-    consent_granted: bool = (
-        False  # Явное разрешение владельца на доступ к данным почтового ящика
-    )
-
-    # IMAP (получение)
-    imap_host: str = ""
-    imap_port: int = 993
-    imap_username: str = ""
-    imap_password: str = ""
-    imap_mailbox: str = "INBOX"
-    imap_use_ssl: bool = True
-
-    # SMTP (отправка)
-    smtp_host: str = ""
-    smtp_port: int = 587
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_use_tls: bool = True
-    smtp_use_ssl: bool = False
-    from_address: str = ""
-
-    # Поведение
-    auto_reply_enabled: bool = True  # Если false, входящая почта читается, но автоматический ответ не отправляется
-    poll_interval_seconds: int = 30
-    mark_seen: bool = True
-    max_body_chars: int = 12000
-    subject_prefix: str = "Re: "
-    allow_from: list[str] = Field(
-        default_factory=list
-    )  # Разрешённые адреса электронной почты отправителей
-
-
 class HeartbeatConfig(Base):
     """Конфигурация сервиса сердцебиения."""
 
@@ -98,14 +43,19 @@ class GatewayConfig(Base):
 
 
 class ChannelsConfig(Base):
-    """Конфигурация чат-каналов."""
+    """
+    Конфигурация чат-каналов.
+
+    Встроенные и плагин-конфигурации каналов хранятся как дополнительные поля (словари).
+    Каждый канал парсит свою собственную конфигурацию в __init__.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     send_progress: bool = True  # отправлять прогресс текста агента в канал
     send_tool_hints: bool = (
         False  # отправлять подсказки о вызовах инструментов (напр. read_file("…")
     )
-    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
-    email: EmailConfig = Field(default_factory=EmailConfig)
 
 
 class AgentDefaults(Base):
@@ -187,7 +137,7 @@ class WebSearchConfig(Base):
     """Конфигурация веб-поиска."""
 
     provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina
-    api_key: str = ""  # API-ключ Brave Search
+    api_key: str = ""
     base_url: str = ""  # SearXNG base URL
     max_results: int = 5
 
@@ -224,6 +174,9 @@ class MCPServerConfig(Base):
         default_factory=dict
     )  # HTTP/SSE: пользовательские заголовки
     tool_timeout: int = 30  # секунд до отмены вызова инструмента
+    enabled_tools: list[str] = Field(
+        default_factory=lambda: ["*"]
+    )  # Регистрировать только эти инструменты; принимает исходные имена MCP или обёрнутые имена mcp_<server>_<tool>; ["*"] = все инструменты; [] = без инструментов
 
 
 class ToolsConfig(Base):
