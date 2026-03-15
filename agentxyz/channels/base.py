@@ -38,7 +38,6 @@ class BaseChannel(ABC):
 
     name: str = "base"
     display_name: str = "Base"
-    transcription_api_key: str = ""
 
     def __init__(self, config: Any, bus: MessageBus):
         """
@@ -54,8 +53,6 @@ class BaseChannel(ABC):
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
         """Транскрибировать аудиофайл в текст с помощью Whisper."""
-        if not self.transcription_api_key:
-            return ""
         try:
             from agentxyz.providers.transcription import WhisperTranscriptionProvider
 

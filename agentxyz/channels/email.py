@@ -195,7 +195,7 @@ class EmailChannel(BaseChannel):
         try:
             await asyncio.to_thread(self._smtp_send, email_msg)
         except Exception as e:
-            logger.error("Ошибка отправки email на {}: {e}", to_addr, e)
+            logger.error("Ошибка отправки email на {}: {}", to_addr, e)
             raise
 
     def _validate_config(self) -> bool:

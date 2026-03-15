@@ -164,9 +164,11 @@ class SessionHistoryResponse(BaseModel):
 class WSMessage(BaseModel):
     """WebSocket сообщение от клиента."""
 
-    type: str = Field(..., description="Тип сообщения: 'chat' или другие")
-    message: str = Field(..., description="Содержимое сообщения")
+    type: str = Field(..., description="Тип сообщения: 'chat', 'audio' и другие")
+    message: str = Field(default="", description="Содержимое сообщения (для type=chat)")
     session_id: str = Field(default="default", description="ID сессии")
+    audio: str | None = Field(default=None, description="Base64 аудио (для type=audio)")
+    filename: str | None = Field(default=None, description="Имя файла (для type=audio)")
 
 
 class WSResponse(BaseModel):
