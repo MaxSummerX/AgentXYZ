@@ -14,6 +14,7 @@ from loguru import logger
 
 from agentxyz.agent.context import ContextBuilder
 from agentxyz.agent.memory import MemoryConsolidator
+from agentxyz.agent.skills import BUILTIN_SKILLS_DIR
 from agentxyz.agent.subagent import SubagentManager
 from agentxyz.agent.tools.cron import CronTool
 from agentxyz.agent.tools.filesystem import (
@@ -117,7 +118,15 @@ class AgentLoop:
         """Зарегистрировать набор инструментов по умолчанию."""
         # Файловые инструменты (ограничить рабочим пространством, если настроено)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
+        extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
+        self.tools.register(
+            ReadFileTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                extra_allowed_dirs=extra_read,
+            )
+        )
+        for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
 
         # Инструмент оболочки

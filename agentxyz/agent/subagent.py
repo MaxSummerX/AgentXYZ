@@ -8,6 +8,7 @@ from typing import Any
 
 from loguru import logger
 
+from agentxyz.agent.skills import BUILTIN_SKILLS_DIR
 from agentxyz.agent.tools.filesystem import (
     EditFileTool,
     ListDirTool,
@@ -119,8 +120,13 @@ class SubagentManager:
             # Собрать инструменты субагента (без message-инструмента, без spawn-инструмента)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
+            extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             tools.register(
-                ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir)
+                ReadFileTool(
+                    workspace=self.workspace,
+                    allowed_dir=allowed_dir,
+                    extra_allowed_dirs=extra_read,
+                )
             )
             tools.register(
                 WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir)
