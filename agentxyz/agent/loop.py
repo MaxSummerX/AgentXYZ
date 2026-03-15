@@ -246,9 +246,10 @@ class AgentLoop:
                     thought = self._strip_think(response.content)
                     if thought:
                         await on_progress(thought)
-                    await on_progress(
-                        self._tool_hint(response.tool_calls), tool_hint=True
-                    )
+                    tool_hint = self._tool_hint(response.tool_calls)
+                    tool_hint_stripped = self._strip_think(tool_hint)
+                    if tool_hint_stripped:
+                        await on_progress(tool_hint_stripped, tool_hint=True)
 
                 tool_call_dicts = [
                     tc.to_openai_tool_call() for tc in response.tool_calls
@@ -312,6 +313,11 @@ class AgentLoop:
                 # Ожидание следующего сообщения
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
             except TimeoutError:
+                continue
+            except Exception as e:
+                logger.warning(
+                    "Ошибка при получении входящего сообщения: {}, продолжаем...", e
+                )
                 continue
 
             cmd = msg.content.strip().lower()
