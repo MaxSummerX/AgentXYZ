@@ -6,10 +6,11 @@ import asyncio
 import re
 import time
 import unicodedata
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import aiofiles
 from loguru import logger
+from pydantic import Field
 from telegram import BotCommand, Message, ReplyParameters, Update
 from telegram.ext import (
     Application,
@@ -22,13 +23,13 @@ from telegram.request import HTTPXRequest
 
 from agentxyz.channels.base import BaseChannel
 from agentxyz.config.paths import get_media_dir
+from agentxyz.config.schema import Base
 from agentxyz.utils.helpers import split_message
 
 
 if TYPE_CHECKING:
     from agentxyz.bus.events import OutboundMessage
     from agentxyz.bus.queue import MessageBus
-    from agentxyz.config.schema import TelegramConfig
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Лимит символов сообщения Telegram
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = (
@@ -165,6 +166,17 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+class TelegramConfig(Base):
+    """Конфигурация канала Telegram."""
+
+    enabled: bool = False
+    token: str = ""
+    allow_from: list[str] = Field(default_factory=list)
+    proxy: str | None = None
+    reply_to_message: bool = False
+    group_policy: Literal["open", "mention"] = "mention"
+
+
 class TelegramChannel(BaseChannel):
     """
     Канал Telegram через long polling.
@@ -183,7 +195,13 @@ class TelegramChannel(BaseChannel):
         BotCommand("restart", "Перезапустить бота"),
     ]
 
-    def __init__(self, config: TelegramConfig, bus: MessageBus):
+    @classmethod
+    def default_config(cls) -> dict[str, Any]:
+        return TelegramConfig().model_dump(by_alias=True)
+
+    def __init__(self, config: Any, bus: MessageBus):
+        if isinstance(config, dict):
+            config = TelegramConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self._app: Application | None = None
@@ -245,8 +263,8 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
-        self._app.add_handler(CommandHandler("help", self._on_help))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Добавить обработчик сообщений для текста, фото, голоса, документов
         self._app.add_handler(
@@ -500,6 +518,7 @@ class TelegramChannel(BaseChannel):
             "🔥 Команды agentxyz:\n"
             "/new — Начать новый диалог\n"
             "/stop — Остановить текущую задачу\n"
+            "/restart — Перезапустить бота\n"
             "/help — Показать доступные команды"
         )
 
@@ -574,7 +593,7 @@ class TelegramChannel(BaseChannel):
             media_type = "animation"
         if not media_file or not self._app:
             return [], []
-        # Assert media_type is not None since media_file is not None
+        # media_type гарантированно не None здесь, так как media_file установлен
         assert media_type is not None
         try:
             file = await self._app.bot.get_file(media_file.file_id)
@@ -584,7 +603,8 @@ class TelegramChannel(BaseChannel):
                 getattr(media_file, "file_name", None),
             )
             media_dir = get_media_dir("telegram")
-            file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
+            unique_id = getattr(media_file, "file_unique_id", media_file.file_id)
+            file_path = media_dir / f"{unique_id}{ext}"
             await file.download_to_drive(str(file_path))
             path_str = str(file_path)
             if media_type in ("voice", "audio"):

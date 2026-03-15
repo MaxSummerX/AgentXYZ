@@ -154,6 +154,11 @@ class BaseChannel(ABC):
 
         await self.bus.publish_inbound(msg)
 
+    @classmethod
+    def default_config(cls) -> dict[str, Any]:
+        """Вернуть конфигурацию по умолчанию для onboard. Переопределить в плагинах для автозаполнения config.json."""
+        return {"enabled": False}
+
     @property
     def is_running(self) -> bool:
         """Проверить, работает ли канал."""
