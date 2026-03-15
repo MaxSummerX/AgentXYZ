@@ -98,7 +98,7 @@ class LiteLLMProvider(LLMProvider):
             prefix = self._gateway.litellm_prefix
             if self._gateway.strip_model_prefix:
                 model = model.split("/")[-1]
-            if prefix and not model.startswith(f"{prefix}/"):
+            if prefix:
                 model = f"{prefix}/{model}"
             return model
 
@@ -283,6 +283,9 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+
+        if self._gateway:
+            kwargs.update(self._gateway.litellm_kwargs)
 
         # Применить переопределения для конкретной модели (например, температура для kimi-k2.5)
         self._apply_model_overrides(model, kwargs)

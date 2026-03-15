@@ -93,6 +93,14 @@ class LLMProvider(ABC):
         "server error",
         "temporarily unavailable",
     )
+    _IMAGE_UNSUPPORTED_MARKERS = (
+        "image_url is only supported",
+        "does not support image",
+        "images are not supported",
+        "image input is not supported",
+        "image_url is not supported",
+        "unsupported image input",
+    )
 
     _SENTINEL = object()
 
@@ -204,6 +212,44 @@ class LLMProvider(ABC):
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
+    @classmethod
+    def _is_image_unsupported_error(cls, content: str | None) -> bool:
+        err = (content or "").lower()
+        return any(marker in err for marker in cls._IMAGE_UNSUPPORTED_MARKERS)
+
+    @staticmethod
+    def _strip_image_content(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """Заменить блоки image_url на текстовый плейсхолдер. Возвращает None, если изображения не найдены."""
+        found = False
+        result = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "image_url":
+                        new_content.append({"type": "text", "text": "[image omitted]"})
+                        found = True
+                    else:
+                        new_content.append(b)
+                result.append({**msg, "content": new_content})
+            else:
+                result.append(msg)
+        return result if found else None
+
+    async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
+        """Вызвать chat() и преобразовать неожиданные исключения в ответы об ошибках."""
+        try:
+            return await self.chat(**kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return LLMResponse(
+                content=f"Error calling LLM: {exc}", finish_reason="error"
+            )
+
     async def chat_with_retry(
         self,
         messages: list[dict[str, Any]],
@@ -220,74 +266,49 @@ class LLMProvider(ABC):
         явно, чтобы вызывающим не нужно было передавать temperature / max_tokens /
         reasoning_effort через каждый слой.
         """
-        actual_max_tokens: int
-        actual_temperature: float
-        actual_reasoning_effort: str | None
-
         if max_tokens is self._SENTINEL:
-            actual_max_tokens = self.generation.max_tokens
-        else:
-            actual_max_tokens = max_tokens  # type: ignore[assignment]
+            max_tokens = self.generation.max_tokens
         if temperature is self._SENTINEL:
-            actual_temperature = self.generation.temperature
-        else:
-            actual_temperature = temperature  # type: ignore[assignment]
+            temperature = self.generation.temperature
         if reasoning_effort is self._SENTINEL:
-            actual_reasoning_effort = self.generation.reasoning_effort
-        else:
-            actual_reasoning_effort = reasoning_effort  # type: ignore[assignment]
+            reasoning_effort = self.generation.reasoning_effort
+
+        kw: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools,
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "reasoning_effort": reasoning_effort,
+            "tool_choice": tool_choice,
+        }
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
-            try:
-                response = await self.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    max_tokens=actual_max_tokens,
-                    temperature=actual_temperature,
-                    reasoning_effort=actual_reasoning_effort,
-                    tool_choice=tool_choice,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                response = LLMResponse(
-                    content=f"Error calling LLM: {exc}",
-                    finish_reason="error",
-                )
+            response = await self._safe_chat(**kw)
 
             if response.finish_reason != "error":
                 return response
+
             if not self._is_transient_error(response.content):
+                if self._is_image_unsupported_error(response.content):
+                    stripped = self._strip_image_content(messages)
+                    if stripped is not None:
+                        logger.warning(
+                            "Модель не поддерживает изображения, повторяем без изображений"
+                        )
+                        return await self._safe_chat(**{**kw, "messages": stripped})
                 return response
 
-            err = (response.content or "").lower()
             logger.warning(
                 "Временная ошибка LLM (попытка {}/{}), повтор через {}s: {}",
                 attempt,
                 len(self._CHAT_RETRY_DELAYS),
                 delay,
-                err[:120],
+                (response.content or "")[:120].lower(),
             )
             await asyncio.sleep(delay)
 
-        try:
-            return await self.chat(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_tokens=actual_max_tokens,
-                temperature=actual_temperature,
-                reasoning_effort=actual_reasoning_effort,
-                tool_choice=tool_choice,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return LLMResponse(
-                content=f"Error calling LLM: {exc}",
-                finish_reason="error",
-            )
+        return await self._safe_chat(**kw)
 
     @abstractmethod
     def get_default_model(self) -> str:

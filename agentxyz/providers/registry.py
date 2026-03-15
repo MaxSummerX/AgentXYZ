@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -53,7 +53,9 @@ class ProviderSpec:
     strip_model_prefix: bool = (
         False  # удалить "provider/" перед повторным префиксированием
     )
-
+    litellm_kwargs: dict[str, Any] = field(
+        default_factory=dict
+    )  # extra kwargs passed to LiteLLM
     # переопределения параметров для конкретных моделей, например (("kimi-k2.5", {"temperature": 1.0}),)
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
 
@@ -323,6 +325,7 @@ def find_by_model(model: str) -> ProviderSpec | None:
     for spec in std_specs:
         if model_prefix and normalized_prefix == spec.name:
             return spec
+
     for spec in std_specs:
         if any(
             kw in model_lower or kw.replace("-", "_") in model_normalized
