@@ -25,7 +25,7 @@ async def handle_audio_message(
     ws_msg: WSMessage,
     session_id: str,
     channel: "GatewayServer",
-) -> None:
+) -> str | None:
     """
     Обработать аудио сообщение для транскрипции.
 
@@ -34,6 +34,9 @@ async def handle_audio_message(
         ws_msg: WebSocket сообщение с аудио
         session_id: ID сессии
         channel: GatewayServer
+
+    Returns:
+        Транскрибированный текст или None при ошибке.
     """
     # Проверить наличие аудио данных
     if not ws_msg.audio:
@@ -45,7 +48,7 @@ async def handle_audio_message(
             error="missing_audio",
         )
         await websocket.send_json(error_response.model_dump())
-        return
+        return None
 
     try:
         # Декодировать base64
@@ -86,46 +89,16 @@ async def handle_audio_message(
             transcriber = StubTranscriptionProvider(dummy_text="Stub")
 
         # Транскрибировать
-        try:
-            result = await asyncio.wait_for(
-                transcriber.transcribe(temp_path),
-                timeout=transcribe_config.timeout_seconds,
-            )
+        result = await asyncio.wait_for(
+            transcriber.transcribe(temp_path),
+            timeout=transcribe_config.timeout_seconds,
+        )
 
-            if not result:
-                raise ValueError("Пустой результат транскрипции")
+        if not result:
+            raise ValueError("Пустой результат транскрипции")
 
-            # Отправить результат
-            response = WSResponse(
-                type="transcription",
-                content=result,
-                session_id=session_id,
-                done=True,
-            )
-            await websocket.send_json(response.model_dump())
-
-            logger.info(f"Транскрипция завершена: {len(result)} символов")
-
-        except TimeoutError:
-            error_response = WSResponse(
-                type="error",
-                content=f"Таймаут транскрипции ({transcribe_config.timeout_seconds}с)",
-                session_id=session_id,
-                done=True,
-                error="transcription_timeout",
-            )
-            await websocket.send_json(error_response.model_dump())
-
-        except Exception as e:
-            logger.error(f"Ошибка транскрипции: {e}")
-            error_response = WSResponse(
-                type="error",
-                content=f"Ошибка транскрипции: {e}",
-                session_id=session_id,
-                done=True,
-                error="transcription_failed",
-            )
-            await websocket.send_json(error_response.model_dump())
+        logger.info(f"Транскрипция завершена: {len(result)} символов")
+        return result
 
     except binascii.Error as e:
         error_response = WSResponse(
@@ -136,6 +109,7 @@ async def handle_audio_message(
             error="invalid_base64",
         )
         await websocket.send_json(error_response.model_dump())
+        return None
 
     except Exception as e:
         logger.error(f"Ошибка обработки аудио: {e}")
@@ -147,6 +121,7 @@ async def handle_audio_message(
             error=str(type(e).__name__),
         )
         await websocket.send_json(error_response.model_dump())
+        return None
 
     finally:
         # Удалить временный файл
@@ -187,11 +162,12 @@ async def websocket_endpoint(
         "filename": "audio.webm",
         "session_id": "user-123"  # опционально
     }
+    Аудио будет транскрибировано, а результат отправлен агенту как сообщение.
 
     Ответы от сервера:
     {
-        "type": "response" | "transcription" | "error",
-        "content": "Текст ответа или транскрипции",
+        "type": "response" | "error",
+        "content": "Текст ответа агента",
         "session_id": "user-123",
         "done": true,
         "error": null  # только для type="error"
@@ -276,19 +252,26 @@ async def websocket_endpoint(
             # Использовать session_id из сообщения если указан
             effective_session_id = ws_msg.session_id or session_id
 
+            # Определить содержимое сообщения
+            message_content = ws_msg.message
+
             # Обработка аудио сообщений
             if ws_msg.type == "audio":
-                await handle_audio_message(
+                transcribed_text = await handle_audio_message(
                     websocket, ws_msg, effective_session_id, channel
                 )
-                continue
+                if transcribed_text is None:
+                    # Ошибка транскрипции, ответ уже отправлен
+                    continue
+                # Использовать транскрибированный текст как сообщение
+                message_content = transcribed_text
 
             # Создать входящее сообщение
             inbound = InboundMessage(
                 channel="fastapi",
                 sender_id="websocket",
                 chat_id=effective_session_id,
-                content=ws_msg.message,
+                content=message_content,
             )
 
             # Регистрировать WebSocket для получения ответа
