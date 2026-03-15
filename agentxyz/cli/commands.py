@@ -261,6 +261,9 @@ def onboard() -> None:
         save_config(Config())
         console.print(f"[green]✓[/green] Создана конфигурация по пути {config_path}")
 
+    # Обновить конфигурацию каналов (добавить отсутствующие поля)
+    _onboard_plugins(config_path)
+
     console.print(
         "[dim]Шаблон конфигурации теперь использует `maxTokens` + `contextWindowTokens`; `memoryWindow` больше не является настройкой времени выполнения.[/dim]"
     )
@@ -282,6 +285,46 @@ def onboard() -> None:
     console.print("     Возьмите тут: https://openrouter.ai/keys")
     console.print("  2. Запустите Gateway: [cyan]agentxyz gateway[/cyan]")
     console.print("     Или диалог: [cyan]agentxyz agent[/cyan]")
+
+
+def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
+    """Рекурсивно заполнить отсутствующие значения из defaults без перезаписи пользовательской конфигурации."""
+    if not isinstance(existing, dict) or not isinstance(defaults, dict):
+        return existing
+
+    merged = dict(existing)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = value
+        else:
+            merged[key] = _merge_missing_defaults(merged[key], value)
+    return merged
+
+
+def _onboard_plugins(config_path: Path) -> None:
+    """Добавить конфигурацию по умолчанию для всех обнаруженных каналов (встроенные + плагины)."""
+    import json
+
+    from agentxyz.channels.registry import discover_all
+
+    all_channels = discover_all()
+    if not all_channels:
+        return
+
+    with open(config_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    channels = data.setdefault("channels", {})
+    for name, cls in all_channels.items():
+        if name not in channels:
+            channels[name] = cls.default_config()
+        else:
+            channels[name] = _merge_missing_defaults(
+                channels[name], cls.default_config()
+            )
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _make_provider(
@@ -439,6 +482,7 @@ def gateway(
         """Выполнить задачу cron через агента."""
         from agentxyz.agent.tools.cron import CronTool
         from agentxyz.agent.tools.message import MessageTool
+        from agentxyz.utils.evaluator import evaluate_response
 
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"
@@ -467,15 +511,22 @@ def gateway(
             return response
 
         if job.payload.deliver and job.payload.to and response:
-            from agentxyz.bus.events import OutboundMessage
-
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response or "",
-                )
+            should_notify = await evaluate_response(
+                response,
+                job.payload.message,
+                provider,
+                agent.model,
             )
+            if should_notify:
+                from agentxyz.bus.events import OutboundMessage
+
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=job.payload.channel or "cli",
+                        chat_id=job.payload.to,
+                        content=response or "",
+                    )
+                )
         return response
 
     cron.on_job = on_cron_job
@@ -848,7 +899,7 @@ app.add_typer(channels_app, name="channels")
 @channels_app.command("status")
 def channels_status() -> None:
     """Показать статус каналов."""
-    from agentxyz.channels.registry import discover_channel_names, load_channel_class
+    from agentxyz.channels.registry import discover_all
     from agentxyz.config.loader import load_config
 
     config = load_config()
@@ -858,17 +909,59 @@ def channels_status() -> None:
     table.add_column("Включён", style="green")
     table.add_column("Конфигурация", style="yellow")
 
-    for modname in sorted(discover_channel_names()):
-        section = getattr(config.channels, modname, None)
-        enabled = section and getattr(section, "enabled", False)
-        try:
-            cls = load_channel_class(modname)
-            display = cls.display_name
-        except ImportError:
-            display = modname.title()
+    for name, cls in sorted(discover_all().items()):
+        section = getattr(config.channels, name, None)
+        if section is None:
+            enabled = False
+        elif isinstance(section, dict):
+            enabled = section.get("enabled", False)
+        else:
+            enabled = getattr(section, "enabled", False)
         table.add_row(
-            display,
+            cls.display_name,
             "[green]\u2713[/green]" if enabled else "[dim]\u2717[/dim]",
+        )
+
+    console.print(table)
+
+
+# ============================================================================
+# Команды плагинов
+# ============================================================================
+
+plugins_app = typer.Typer(help="Управление плагинами каналов")
+app.add_typer(plugins_app, name="plugins")
+
+
+@plugins_app.command("list")
+def plugins_list() -> None:
+    """Показать все обнаруженные каналы (встроенные и плагины)."""
+    from agentxyz.channels.registry import discover_all, discover_channel_names
+    from agentxyz.config.loader import load_config
+
+    config = load_config()
+    builtin_names = set(discover_channel_names())
+    all_channels = discover_all()
+
+    table = Table(title="Плагины каналов")
+    table.add_column("Имя", style="cyan")
+    table.add_column("Источник", style="magenta")
+    table.add_column("Включён", style="green")
+
+    for name in sorted(all_channels):
+        cls = all_channels[name]
+        source = "builtin" if name in builtin_names else "plugin"
+        section = getattr(config.channels, name, None)
+        if section is None:
+            enabled = False
+        elif isinstance(section, dict):
+            enabled = section.get("enabled", False)
+        else:
+            enabled = getattr(section, "enabled", False)
+        table.add_row(
+            cls.display_name,
+            source,
+            "[green]да[/green]" if enabled else "[dim]нет[/dim]",
         )
 
     console.print(table)
