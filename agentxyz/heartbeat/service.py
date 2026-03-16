@@ -88,6 +88,8 @@ class HeartbeatService:
 
         Возвращает (action, tasks), где action — 'skip' или 'run'.
         """
+        from agentxyz.utils.helpers import current_time_str
+
         response = await self.provider.chat_with_retry(
             messages=[
                 {
@@ -97,6 +99,7 @@ class HeartbeatService:
                 {
                     "role": "user",
                     "content": (
+                        f"Current Time: {current_time_str()}\n\n"
                         "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
                         f"{content}"
                     ),
