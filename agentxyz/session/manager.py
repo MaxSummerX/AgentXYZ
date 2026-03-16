@@ -43,23 +43,55 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
+    @staticmethod
+    def _find_legal_start(messages: list[dict[str, Any]]) -> int:
+        """Найти первый индекс, где каждый результат инструмента имеет соответствующий вызов tool_call от ассистента."""
+        declared: set[str] = set()
+        start = 0
+        for i, msg in enumerate(messages):
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        declared.add(str(tc["id"]))
+            elif role == "tool":
+                tid = msg.get("tool_call_id")
+                if tid and str(tid) not in declared:
+                    start = i + 1
+                    declared.clear()
+                    for prev in messages[start : i + 1]:
+                        if prev.get("role") == "assistant":
+                            for tc in prev.get("tool_calls") or []:
+                                if isinstance(tc, dict) and tc.get("id"):
+                                    declared.add(str(tc["id"]))
+        return start
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Возвращает неконсолидированные сообщения для ввода в LLM, выровненные по очереди пользователя."""
         unconsolidated = self.messages[self.last_consolidated :]
         sliced = unconsolidated[-max_messages:]
 
         # Пропускать начальные сообщения, не исходящие от пользователей, чтобы избежать блоков tool_result без соответствующих вызовов
-        for i, m in enumerate(sliced):
-            if m.get("role") == "user":
+        for i, message in enumerate(sliced):
+            if message.get("role") == "user":
                 sliced = sliced[i:]
                 break
 
+        # Некоторые провайдеры отклоняют "сиротские" результаты инструментов, если соответствующее сообщение assistant
+        # с tool_calls выпало из фиксированного окна истории.
+        start = self._find_legal_start(sliced)
+        if start:
+            sliced = sliced[start:]
+
         out: list[dict[str, Any]] = []
-        for m in sliced:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
-            for k in ("tool_calls", "tool_call_id", "name"):
-                if k in m:
-                    entry[k] = m[k]
+        for message in sliced:
+            entry: dict[str, Any] = {
+                "role": message["role"],
+                "content": message.get("content", ""),
+            }
+            for key in ("tool_calls", "tool_call_id", "name"):
+                if key in message:
+                    entry[key] = message[key]
             out.append(entry)
         return out
 
