@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import weakref
-from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -85,7 +83,7 @@ def _is_tool_choice_unsupported(content: str | None) -> bool:
 class MemoryStore:
     """Двухуровневая память: MEMORY.md (долгосрочные факты) + HISTORY.md (лог, доступный для поиска через grep)."""
 
-    _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
+    MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
         self.memory_dir = ensure_dir(workspace / "memory")
@@ -231,7 +229,7 @@ class MemoryStore:
     def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
         """Увеличивает счётчик ошибок; после порога архивирует необработанные сообщения и возвращает True."""
         self._consecutive_failures += 1
-        if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
+        if self._consecutive_failures < self.MAX_FAILURES_BEFORE_RAW_ARCHIVE:
             return False
         self._raw_archive(messages)
         self._consecutive_failures = 0
@@ -324,14 +322,14 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive_unconsolidated(self, session: Session) -> bool:
-        """Архивировать весь консолидируемый хвост для сброса сессии в стиле /new."""
-        lock = self.get_lock(session.key)
-        async with lock:
-            snapshot = session.messages[session.last_consolidated :]
-            if not snapshot:
+    async def archive_messages(self, messages: list[dict[str, object]]) -> bool:
+        """Архивировать сообщения с гарантией сохранности (повторные попытки до использования raw-dump)."""
+        if not messages:
+            return True
+        for _ in range(self.store.MAX_FAILURES_BEFORE_RAW_ARCHIVE):
+            if await self.consolidate_messages(messages):
                 return True
-            return await self.consolidate_messages(snapshot)
+        return True
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Цикл: архивировать старые сообщения, пока промпт не уместится в половину контекстного окна."""
