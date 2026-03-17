@@ -5,9 +5,10 @@ import os
 import select
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 
 # Принудительное использование кодировки UTF-8 для консоли Windows
@@ -180,6 +181,55 @@ async def _print_interactive_response(response: str, render_markdown: bool) -> N
     await run_in_terminal(_write)
 
 
+class _ThinkingSpinner:
+    """Обёртка для спиннера с поддержкой паузы для чистого вывода прогресса."""
+
+    def __init__(self, enabled: bool):
+        self._spinner = (
+            console.status("[dim]agentxyz думает...[/dim]", spinner="dots")
+            if enabled
+            else None
+        )
+        self._active = False
+
+    def __enter__(self) -> Self:
+        if self._spinner:
+            self._spinner.start()
+        self._active = True
+        return self
+
+    def __exit__(self, *exc: object) -> Literal[False]:
+        self._active = False
+        if self._spinner:
+            self._spinner.stop()
+        return False
+
+    @contextmanager
+    def pause(self) -> Iterator[None]:
+        """Временно остановить спиннер при выводе прогресса."""
+        if self._spinner and self._active:
+            self._spinner.stop()
+        try:
+            yield
+        finally:
+            if self._spinner and self._active:
+                self._spinner.start()
+
+
+def _print_cli_progress_line(text: str, thinking: _ThinkingSpinner | None) -> None:
+    """Вывести строку прогресса CLI, приостанавливая спиннер при необходимости."""
+    with thinking.pause() if thinking else nullcontext():
+        console.print(f"  [dim]↳ {text}[/dim]")
+
+
+async def _print_interactive_progress_line(
+    text: str, thinking: _ThinkingSpinner | None
+) -> None:
+    """Вывести интерактивную строку прогресса, приостанавливая спиннер при необходимости."""
+    with thinking.pause() if thinking else nullcontext():
+        await _print_interactive_line(text)
+
+
 def _is_exit_command(command: str) -> bool:
     """Вернуть True, когда ввод должен завершить интерактивный чат."""
     return command.lower() in EXIT_COMMANDS
@@ -228,13 +278,36 @@ def main(
 
 
 @app.command()
-def onboard() -> None:
+def onboard(
+    workspace_param: str | None = typer.Option(
+        None, "--workspace", "-w", help="Рабочая директория"
+    ),
+    config: str | None = typer.Option(
+        None, "--config", "-c", help="Путь к файлу конфигурации"
+    ),
+) -> None:
     """Инициализация конфигурации и рабочего пространства agentxyz."""
-    from agentxyz.config.loader import get_config_path, load_config, save_config
+    from agentxyz.config.loader import (
+        get_config_path,
+        load_config,
+        save_config,
+        set_config_path,
+    )
     from agentxyz.config.schema import Config
 
-    config_path = get_config_path()
+    if config:
+        config_path = Path(config).expanduser().resolve()
+        set_config_path(config_path)
+        console.print(f"[dim]Используется конфиг: {config_path}[/dim]")
+    else:
+        config_path = get_config_path()
 
+    def _apply_workspace_override(loaded: Config) -> Config:
+        if workspace_param:
+            loaded.agents.defaults.workspace = workspace_param
+        return loaded
+
+    # Создать или обновить конфиг
     if config_path.exists():
         console.print(
             f"[yellow]Конфигурация уже существует по пути {config_path}[/yellow]"
@@ -246,29 +319,30 @@ def onboard() -> None:
             "  [bold]N[/bold] = обновить конфигурацию, сохраняя существующие значения и добавляя новые поля"
         )
         if typer.confirm("Перезаписать?"):
-            config = Config()
-            save_config(config)
+            cfg_obj = _apply_workspace_override(Config())
+            save_config(cfg_obj, config_path)
             console.print(
                 f"[green]✓[/green] Конфигурация сброшена на значения по умолчанию в {config_path}"
             )
         else:
-            config = load_config()
-            save_config(config)
+            cfg_obj = _apply_workspace_override(load_config(config_path))
+            save_config(cfg_obj, config_path)
             console.print(
                 f"[green]✓[/green] Конфигурация обновлена в {config_path} (существующие значения сохранены)"
             )
     else:
-        save_config(Config())
+        cfg_obj = _apply_workspace_override(Config())
+        save_config(cfg_obj, config_path)
         console.print(f"[green]✓[/green] Создана конфигурация по пути {config_path}")
-
-    # Обновить конфигурацию каналов (добавить отсутствующие поля)
-    _onboard_plugins(config_path)
 
     console.print(
         "[dim]Шаблон конфигурации теперь использует `maxTokens` + `contextWindowTokens`; `memoryWindow` больше не является настройкой времени выполнения.[/dim]"
     )
+    # Обновить конфигурацию каналов (добавить отсутствующие поля)
+    _onboard_plugins(config_path)
+
     # Создать рабочее пространство
-    workspace = get_workspace_path()
+    workspace = get_workspace_path(cfg_obj.workspace_path)
 
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
@@ -279,12 +353,17 @@ def onboard() -> None:
     # Создать файлы bootstrap по умолчанию
     sync_workspace_templates(workspace, console=console)
 
+    agent_cmd = 'agentxyz agent -m "Hello!"'
+    if config:
+        agent_cmd += f" --config {config_path}"
+
     console.print(f"\n{__logo__} agentxyz готов к работе!")
     console.print("\nДальнейшие действия:")
     console.print("  1. Укажите API ключ в [cyan]~/.agentxyz/config.json[/cyan]")
     console.print("     Возьмите тут: https://openrouter.ai/keys")
     console.print("  2. Запустите Gateway: [cyan]agentxyz gateway[/cyan]")
     console.print("     Или диалог: [cyan]agentxyz agent[/cyan]")
+    console.print(f"\n[dim]Пример команды: {agent_cmd}[/dim]")
 
 
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -345,6 +424,7 @@ def _make_provider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
+            extra_headers=p.extra_headers if p else None,
         )
     else:
         from agentxyz.providers.litellm_provider import LiteLLMProvider
@@ -623,7 +703,9 @@ def gateway(
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {hb_cfg.interval_s} задач по расписанию")
+        console.print(
+            f"[green]✓[/green] Cron: {cron_status['jobs']} задач по расписанию"
+        )
 
     console.print("[green]✓[/green] Heartbeat: раз в полчаса")
 
@@ -650,6 +732,11 @@ def gateway(
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nЗавершение...")
+        except Exception:
+            import traceback
+
+            console.print("\n[red]Ошибка: Шлюз неожиданно завершился сбоем[/red]")
+            console.print(traceback.format_exc())
         finally:
             await agent.close_mcp()
             heartbeat.stop()
@@ -730,42 +817,27 @@ def agent(
         channels_config=loaded_config.channels,
     )
 
-    # Показывать спиннер, когда журналы отключены (нет вывода, который можно пропустить); пропускать, когда журналы включены
-    _status_context: Any = None
-
-    def _thinking_ctx() -> Any:
-        nonlocal _status_context
-        if logs:
-            from contextlib import nullcontext
-
-            return nullcontext()
-        # Анимированный спиннер безопасно использовать с обработкой ввода prompt_toolkit
-        _status_context = console.status(
-            "[dim]agentxyz думает...[/dim]", spinner="dots"
-        )
-        return _status_context
+    # Общая ссылка для callbacks прогресса
+    _thinking: _ThinkingSpinner | None = None
 
     async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
-        nonlocal _status_context
         ch = agent_loop.channels_config
         if ch and tool_hint and not ch.send_tool_hints:
             return
         if ch and not tool_hint and not ch.send_progress:
             return
-        if _status_context is not None:
-            _status_context.update(
-                f"[dim]agentxyz думает...[/dim]\n  [dim]↳ {content}[/dim]"
-            )
-        else:
-            console.print(f"  [dim]↳ {content}[/dim]")
+        _print_cli_progress_line(content, _thinking)
 
     if message:
         # Режим одного сообщения — прямой вызов, без шины
         async def run_once() -> None:
-            with _thinking_ctx():
+            nonlocal _thinking
+            _thinking = _ThinkingSpinner(enabled=not logs)
+            with _thinking:
                 response = await agent_loop.process_direct(
                     message, session_id, on_progress=_cli_progress
                 )
+            _thinking = None
             _print_agent_response(response, render_markdown=markdown)
             await agent_loop.close_mcp()
 
@@ -821,7 +893,10 @@ def agent(
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
-                                await _print_interactive_line(msg.content)
+                                await _print_interactive_progress_line(
+                                    msg.content, _thinking
+                                )
+
                         elif not turn_done.is_set():
                             if msg.content:
                                 turn_response.append(msg.content)
@@ -830,6 +905,7 @@ def agent(
                             await _print_interactive_response(
                                 msg.content, render_markdown=markdown
                             )
+
                     except TimeoutError:
                         continue
                     except asyncio.CancelledError:
@@ -863,8 +939,11 @@ def agent(
                             )
                         )
 
-                        with _thinking_ctx():
+                        nonlocal _thinking
+                        _thinking = _ThinkingSpinner(enabled=not logs)
+                        with _thinking:
                             await turn_done.wait()
+                        _thinking = None
 
                         if turn_response:
                             _print_agent_response(
