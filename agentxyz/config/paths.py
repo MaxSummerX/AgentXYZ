@@ -34,7 +34,7 @@ def get_logs_dir() -> Path:
     return get_runtime_subdir("logs")
 
 
-def get_workspace_path(workspace: str | None = None) -> Path:
+def get_workspace_path(workspace: str | Path | None = None) -> Path:
     """Разрешает и гарантирует существование пути к рабочей области агента."""
     path = (
         Path(workspace).expanduser()
