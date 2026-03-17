@@ -24,6 +24,7 @@ class CustomProvider(LLMProvider):
         api_key: str = "no-key",
         api_base: str = "http://localhost:8000/v1",
         default_model: str = "default",
+        extra_headers: dict[str, str] | None = None,
     ):
         """
         Инициализировать провайдер.
@@ -35,11 +36,17 @@ class CustomProvider(LLMProvider):
         """
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        # Сохранять стабильность привязки для этого экземпляра провайдера, чтобы улучшить локальность кэша бэкенда,
+        # при этом позволяя пользователям добавлять специфичные для провайдера заголовки для кастомных шлюзов.
+        default_headers = {
+            "x-session-affinity": uuid.uuid4().hex,
+            **(extra_headers or {}),
+        }
         # Удерживать affinity стабильным для этого экземпляра провайдера для улучшения локальности кэша бэкенда.
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
-            default_headers={"x-session-affinity": uuid.uuid4().hex},
+            default_headers=default_headers,
         )
 
     async def chat(
@@ -93,6 +100,11 @@ class CustomProvider(LLMProvider):
         Returns:
             LLMResponse с извлечённым контентом, tool_calls и статистикой.
         """
+        if not response.choices:
+            return LLMResponse(
+                content="Error: API returned empty choices. This may indicate a temporary service issue or an invalid model response.",
+                finish_reason="error",
+            )
         choice = response.choices[0]
         msg = choice.message
         tool_calls = [
