@@ -93,14 +93,6 @@ class LLMProvider(ABC):
         "server error",
         "temporarily unavailable",
     )
-    _IMAGE_UNSUPPORTED_MARKERS = (
-        "image_url is only supported",
-        "does not support image",
-        "images are not supported",
-        "image input is not supported",
-        "image_url is not supported",
-        "unsupported image input",
-    )
 
     _SENTINEL = object()
 
@@ -136,19 +128,27 @@ class LLMProvider(ABC):
                 continue
 
             if isinstance(content, list):
-                filtered = [
-                    item
-                    for item in content
-                    if not (
+                new_items: list[Any] = []
+                changed = False
+                for item in content:
+                    if (
                         isinstance(item, dict)
                         and item.get("type") in ("text", "input_text", "output_text")
                         and not item.get("text")
-                    )
-                ]
-                if len(filtered) != len(content):
+                    ):
+                        changed = True
+                        continue
+                    if isinstance(item, dict) and "_meta" in item:
+                        new_items.append(
+                            {k: v for k, v in item.items() if k != "_meta"}
+                        )
+                        changed = True
+                    else:
+                        new_items.append(item)
+                if changed:
                     clean = dict(msg)
-                    if filtered:
-                        clean["content"] = filtered
+                    if new_items:
+                        clean["content"] = new_items
                     elif msg.get("role") == "assistant" and msg.get("tool_calls"):
                         clean["content"] = None
                     else:
@@ -212,11 +212,6 @@ class LLMProvider(ABC):
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
-    @classmethod
-    def _is_image_unsupported_error(cls, content: str | None) -> bool:
-        err = (content or "").lower()
-        return any(marker in err for marker in cls._IMAGE_UNSUPPORTED_MARKERS)
-
     @staticmethod
     def _strip_image_content(
         messages: list[dict[str, Any]],
@@ -230,7 +225,9 @@ class LLMProvider(ABC):
                 new_content = []
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "image_url":
-                        new_content.append({"type": "text", "text": "[image omitted]"})
+                        path = (b.get("_meta") or {}).get("path", "")
+                        placeholder = f"[image: {path}]" if path else "[image omitted]"
+                        new_content.append({"type": "text", "text": placeholder})
                         found = True
                     else:
                         new_content.append(b)
@@ -290,13 +287,12 @@ class LLMProvider(ABC):
                 return response
 
             if not self._is_transient_error(response.content):
-                if self._is_image_unsupported_error(response.content):
-                    stripped = self._strip_image_content(messages)
-                    if stripped is not None:
-                        logger.warning(
-                            "Модель не поддерживает изображения, повторяем без изображений"
-                        )
-                        return await self._safe_chat(**{**kw, "messages": stripped})
+                stripped = self._strip_image_content(messages)
+                if stripped is not None:
+                    logger.warning(
+                        "Модель не поддерживает изображения, повторяем без изображений"
+                    )
+                    return await self._safe_chat(**{**kw, "messages": stripped})
                 return response
 
             logger.warning(
