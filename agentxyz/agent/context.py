@@ -158,6 +158,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        current_role: str = "user",
     ) -> list[dict[str, Any]]:
         """
         Собрать полный список сообщений для вызова LLM.
@@ -169,6 +170,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             media: Опциональный список локальных путей к файлам изображений/медиа.
             channel: Текущий канал (telegram, feishu и т.д.).
             chat_id: Текущий ID чата/пользователя.
+            current_role:
 
         Returns:
             Список сообщений включая системный промпт.
@@ -187,7 +189,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return [
             {"role": "system", "content": self.build_system_prompt(skill_names)},
             *history,
-            {"role": "user", "content": merged},
+            {"role": current_role, "content": merged},
         ]
 
     @staticmethod
@@ -210,7 +212,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 continue
             b64 = base64.b64encode(raw).decode()
             images.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    "_meta": {"path": str(p)},
+                }
             )
 
         if not images:

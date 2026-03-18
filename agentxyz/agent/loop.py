@@ -472,11 +472,14 @@ class AgentLoop:
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
+            # Результаты субагентов должны иметь роль assistant, другие системные сообщения используют роль user
+            current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
                 channel=channel,
                 chat_id=chat_id,
+                current_role=current_role,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -634,7 +637,9 @@ class AgentLoop:
                         if c.get("type") == "image_url" and c.get("image_url", {}).get(
                             "url", ""
                         ).startswith("data:image/"):
-                            filtered.append({"type": "text", "text": "[image]"})
+                            path = (c.get("_meta") or {}).get("path", "")
+                            placeholder = f"[image: {path}]" if path else "[image]"
+                            filtered.append({"type": "text", "text": placeholder})
                         else:
                             filtered.append(c)
                     if not filtered:
