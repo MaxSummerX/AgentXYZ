@@ -6,12 +6,20 @@ import asyncio
 import re
 import time
 import unicodedata
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    ParamSpec,
+    TypeVar,
+)
 
 import aiofiles
 from loguru import logger
 from pydantic import Field
 from telegram import BotCommand, Message, ReplyParameters, Update
+from telegram.error import TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,8 +37,13 @@ from agentxyz.utils.helpers import split_message
 
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from agentxyz.bus.events import OutboundMessage
     from agentxyz.bus.queue import MessageBus
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 TELEGRAM_MAX_MESSAGE_LEN = 4000  # Лимит символов сообщения Telegram
 TELEGRAM_REPLY_CONTEXT_MAX_LEN = (
@@ -167,6 +180,10 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
+_SEND_MAX_RETRIES = 3
+_SEND_RETRY_BASE_DELAY = 0.5  # секунды, удваивается при каждой попытке
+
+
 class TelegramConfig(Base):
     """Конфигурация канала Telegram."""
 
@@ -176,6 +193,8 @@ class TelegramConfig(Base):
     proxy: str | None = None
     reply_to_message: bool = False
     group_policy: Literal["open", "mention"] = "mention"
+    connection_pool_size: int = 32
+    pool_timeout: float = 5.0
 
 
 class TelegramChannel(BaseChannel):
@@ -243,20 +262,30 @@ class TelegramChannel(BaseChannel):
 
         self._running = True
 
-        # Создать приложение
-        req = HTTPXRequest(
-            connection_pool_size=16,
-            pool_timeout=5.0,
+        proxy = self.config.proxy or None
+
+        # Раздельные пулы соединений, чтобы long-polling (getUpdates) не блокировал исходящие отправки.
+        api_request = HTTPXRequest(
+            connection_pool_size=self.config.connection_pool_size,
+            pool_timeout=self.config.pool_timeout,
             connect_timeout=30.0,
             read_timeout=30.0,
-            proxy=self.config.proxy if self.config.proxy else None,
+            proxy=proxy,
+        )
+        poll_request = HTTPXRequest(
+            connection_pool_size=4,
+            pool_timeout=self.config.pool_timeout,
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            proxy=proxy,
         )
         builder = (
             Application.builder()
             .token(self.config.token)
-            .request(req)
-            .get_updates_request(req)
+            .request(api_request)
+            .get_updates_request(poll_request)
         )
+
         self._app = builder.build()
         self._app.add_error_handler(self._on_error)
 
@@ -414,7 +443,8 @@ class TelegramChannel(BaseChannel):
                     continue
 
                 async with aiofiles.open(media_path, "rb") as f:
-                    await sender(
+                    await self._call_with_retry(
+                        sender,
                         chat_id=chat_id,
                         **{param: f},
                         reply_parameters=reply_params,
@@ -444,6 +474,42 @@ class TelegramChannel(BaseChannel):
                 else:
                     await self._send_text(chat_id, chunk, reply_params, thread_kwargs)
 
+    @staticmethod
+    async def _call_with_retry(
+        fn: Callable[_P, Awaitable[_R]], *args: _P.args, **kwargs: _P.kwargs
+    ) -> _R:
+        """Вызвать асинхронную функцию Telegram API с повтором при таймауте пула/сети.
+
+        Args:
+            fn: Асинхронная функция для вызова с retry.
+            *args: Позиционные аргументы для передачи в fn.
+            **kwargs: Именованные аргументы для передачи в fn.
+
+        Returns:
+            Результат вызова fn.
+
+        Raises:
+            TimedOut: Если все попытки исчерпаны и последний вызов завершился таймаутом.
+        """
+        for attempt in range(1, _SEND_MAX_RETRIES + 1):
+            try:
+                return await fn(*args, **kwargs)
+            except TimedOut:
+                if attempt == _SEND_MAX_RETRIES:
+                    raise
+                delay = _SEND_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.warning(
+                    "Таймаут Telegram (попытка {}/{}), повтор через {:.1f}с",
+                    attempt,
+                    _SEND_MAX_RETRIES,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise AssertionError(
+            "Unreachable code: function must return from loop or raise"
+        )
+
     async def _send_text(
         self,
         chat_id: int,
@@ -456,7 +522,8 @@ class TelegramChannel(BaseChannel):
             return
         try:
             html = _markdown_to_telegram_html(text)
-            await self._app.bot.send_message(
+            await self._call_with_retry(
+                self._app.bot.send_message,
                 chat_id=chat_id,
                 text=html,
                 parse_mode="HTML",
@@ -470,7 +537,8 @@ class TelegramChannel(BaseChannel):
             try:
                 if not self._app or not self._app.bot:
                     return
-                await self._app.bot.send_message(
+                await self._call_with_retry(
+                    self._app.bot.send_message,
                     chat_id=chat_id,
                     text=text,
                     reply_parameters=reply_params,
