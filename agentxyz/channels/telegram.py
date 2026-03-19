@@ -24,6 +24,7 @@ from telegram.request import HTTPXRequest
 from agentxyz.channels.base import BaseChannel
 from agentxyz.config.paths import get_media_dir
 from agentxyz.config.schema import Base
+from agentxyz.security.network import validate_url_target
 from agentxyz.utils.helpers import split_message
 
 
@@ -345,6 +346,10 @@ class TelegramChannel(BaseChannel):
             return "audio"
         return "document"
 
+    @staticmethod
+    def _is_remote_media_url(path: str) -> bool:
+        return path.startswith(("http://", "https://"))
+
     async def send(self, msg: OutboundMessage) -> None:
         """Отправить сообщение через Telegram."""
         if not self._app:
@@ -395,6 +400,18 @@ class TelegramChannel(BaseChannel):
                     if media_type in ("voice", "audio")
                     else "document"
                 )
+
+                if self._is_remote_media_url(media_path):
+                    ok, error = validate_url_target(media_path)
+                    if not ok:
+                        raise ValueError(f"unsafe media URL: {error}")
+                    await sender(
+                        chat_id=chat_id,
+                        **{param: media_path},
+                        reply_parameters=reply_params,
+                        **thread_kwargs,
+                    )
+                    continue
 
                 async with aiofiles.open(media_path, "rb") as f:
                     await sender(
