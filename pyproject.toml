@@ -22,7 +22,7 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "loguru>=0.7.3",
     "httpx>=0.28.1",
-    "litellm>=1.82.1",
+    "litellm==1.82.1",
     "mcp>=1.26.0",
     "ddgs>=9.10.0",
     "readability-lxml>=0.8.4.1",
