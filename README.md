@@ -21,10 +21,10 @@
 
 ### 🐳 Docker и DevOps
 - **Makefile** — удобные команды для управления проектом
-- **docker-compose.yml** — конфигурация для Docker
+- **docker-compose.yml / docker-compose.prod.yml** — конфигурации Docker для dev (без лимитов) и prod (с лимитами ресурсов)
 
 ### 🔄 Синхронизация
-- **Активный мердж** — регулярная интеграция изменений из оригинального репозитория
+- **Самостоятельная ветка** — форк развивается независимо от оригинального репозитория (архитектуры разошлись, активного мерджа нет)
 
 ### 💻 Изменения в кодовой базе
 
@@ -32,9 +32,9 @@
   - **Оригинал**: Groq API → **AgentXYZ**: faster-whisper medium (локальный, офлайн)
   - Модель "medium" — баланс веса/качества для русского языка
 
-- **tools/web.py** — полностью переработан
-  - **WebSearchTool**: fallback с 4 движками (Exa → Tavily → DDGS → Brave)
-  - **WebFetchTool**: fallback с 3 методами (Tavily → Exa → Readability), Readability принимает markdown от CDN/Cloudflare
+- **agent/tools/web.py** — полностью переработан
+  - **WebSearchTool**: настраиваемый провайдер поиска — brave (по умолчанию), tavily, searxng, jina, duckduckgo (без ключа); при отсутствии API-ключа откат на DuckDuckGo
+  - **WebFetchTool**: Jina Reader (`r.jina.ai`) как основной метод, fallback на локальный readability-lxml
 
 - **gateway/** — FastAPI + WebSocket сервер с HTTP/WebSocket API, авторизацией и routes (admin, chat, auth_deps)
 
@@ -42,7 +42,7 @@
 Убраны неиспользуемые каналы, провайдеры и навыки для фокусировки на основном функционале:
 - **Каналы**: только `telegram` и `email` (убраны: discord, feishu, matrix, mochat, slack и т.д)
 - **Провайдеры**: убран `openai_codex_provider`, OAuth login
-- **Навыки**: убраны `clawhub` и `summarize`
+- **Навыки**: убран `clawhub`
 - **CLI**: убраны WhatsApp bridge, OAuth login
 
 ### Личный опыт
@@ -199,16 +199,20 @@ agentxyz gateway
 
 ```bash
 # ~/.agentxyz/.env или .env в корне проекта
-EXA_API_KEY=your_exa_api_key
-TAVILY_API_KEY=your_tavily_api_key
 BRAVE_API_KEY=your_brave_api_key
+TAVILY_API_KEY=your_tavily_api_key
+JINA_API_KEY=your_jina_api_key
+SEARXNG_BASE_URL=http://localhost:8080
 ```
 
-| API ключ | Назначение | Получить |
+| Переменная | Назначение | Получить |
 |----------|------------|----------|
-| `EXA_API_KEY` | Web-поиск и извлечение (рекомендуется) | [exa.ai](https://exa.ai) |
-| `TAVILY_API_KEY` | Web-поиск и извлечение | [tavily.com](https://tavily.com) |
-| `BRAVE_API_KEY` | Web-поиск (fallback) | [search.brave.com/api](https://search.brave.com/api) |
+| `BRAVE_API_KEY` | Web-поиск (провайдер по умолчанию) | [search.brave.com/api](https://search.brave.com/api) |
+| `TAVILY_API_KEY` | Web-поиск | [tavily.com](https://tavily.com) |
+| `JINA_API_KEY` | Web-поиск (jina) и извлечение контента (Jina Reader) | [jina.ai](https://jina.ai) |
+| `SEARXNG_BASE_URL` | Web-поиск через self-hosted SearXNG | свой инстанс [searxng](https://docs.searxng.org) |
+
+> Без ключей поиск работает через DuckDuckGo, извлечение контента — через readability-lxml.
 
 ## 🛠️ CLI команды
 
@@ -219,7 +223,6 @@ BRAVE_API_KEY=your_brave_api_key
 | `agentxyz agent -m "..."` | Отправить одно сообщение |
 | `agentxyz gateway` | Запуск шлюза |
 | `agentxyz status` | Статус системы |
-| `agentxyz cron add/list/remove` | Управление расписанием |
 
 Выход из интерактивного режима: `exit`, `quit`, `Ctrl+D`
 
@@ -230,16 +233,16 @@ BRAVE_API_KEY=your_brave_api_key
 make build
 
 # Инициализация
-make run-onboard
+make onboard
 
 # Редактирование конфига
 vim ~/.agentxyz/config.json
 
 # Запуск шлюза
-make run-gateway
+make up
 
 # CLI
-make run-cli
+make agent
 ```
 
 ## 📁 Структура проекта
@@ -253,7 +256,7 @@ agentxyz/
 │   ├── skills.py   #    Загрузчик навыков
 │   ├── subagent.py #    Фоновые задачи
 │   └── tools/      #    Встроенные инструменты
-├── skills/         # 🎯 Навыки (github, weather, tmux, cron, memory, agent-skills)
+├── skills/         # 🎯 Навыки (github, weather, tmux, cron, memory, agent-skills, blogwatcher, gifgrep, qwen-code, skill-creator, summarize)
 ├── channels/       # 📱 Интеграции с каналами связи (telegram, email)
 ├── bus/            # 🚌 Маршрутизация сообщений
 ├── cli/            # 🖥️ CLI команды
@@ -263,6 +266,7 @@ agentxyz/
 ├── heartbeat/      # 💓 Периодические задачи
 ├── providers/      # 🤖 LLM провайдеры
 ├── session/        # 💬 Сессии бесед
+├── security/       # 🛡️ Безопасность (SSRF-защита сетевых запросов)
 ├── templates/      # 📄 Шаблоны (AGENTS.md, HEARTBEAT.md, TOOLS.md, USER.md, SOUL.md)
 └── utils/          # 🔧 Утилиты
 
@@ -315,6 +319,6 @@ chmod 700 ~/.agentxyz
 ## Благодарности
 
 Этот проект основан на [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — многоагентном фреймворке.
-Я регулярно синхронизирую изменения из оригинального репозитория и расширяю его дополнительными возможностями.
+Форк развивается независимо: архитектуры проектов разошлись, активная синхронизация с оригиналом не ведётся.
 
 **Репозиторий**: [github.com/MaxSummerX/AgentXYZ](https://github.com/MaxSummerX/AgentXYZ)

@@ -1,5 +1,5 @@
 .PHONY: help build rebuild up down restart logs ps clean clean-all prune backup restore
-.PHONY: agent agent-cmd status cron-list cron-add cron-remove cron-enable cron-disable cron-run shell
+.PHONY: agent agent-cmd status shell
 .PHONY: channels-status onboard test test-cov lint format format-check install typecheck dev-gateway
 .PHONY: dev-up dev-logs dev-down
 
@@ -63,38 +63,8 @@ agent-cmd: ## Отправить одно сообщение (использов
 status: ## Статус системы
 	$(COMPOSE_PROD) --profile cli run --rm cli status
 
-cron-list: ## Список cron задач
-	$(COMPOSE_PROD) --profile cli run --rm cli cron list
-
-cron-add: ## Добавить cron задачу (использование: make cron-add NAME="название" MSG="текст" EVERY=3600)
-	@if [ -z "$(NAME)" ] || [ -z "$(MSG)" ] || [ -z "$(EVERY)" ]; then \
-		echo "Использование: make cron-add NAME='название' MSG='сообщение' EVERY=3600"; \
-		exit 1; \
-	fi
-	$(COMPOSE_PROD) --profile cli run --rm cli cron add -n "$(NAME)" -m "$(MSG)" -e "$(EVERY)"
-
-cron-remove: ## Удалить cron задачу (использование: make cron-remove ID=task_id)
-	@if [ -z "$(ID)" ]; then echo "Укажите ID: make cron-remove ID=task_id"; exit 1; fi
-	$(COMPOSE_PROD) --profile cli run --rm cli cron remove $(ID)
-
 shell: ## Bash shell в контейнере
 	$(COMPOSE_PROD) --profile cli run --rm cli bash
-
-cron-enable: ## Включить cron задачу (использование: make cron-enable ID=task_id)
-	@if [ -z "$(ID)" ]; then echo "Укажите ID: make cron-enable ID=task_id"; exit 1; fi
-	$(COMPOSE_PROD) --profile cli run --rm cli cron enable $(ID)
-
-cron-disable: ## Отключить cron задачу (использование: make cron-disable ID=task_id)
-	@if [ -z "$(ID)" ]; then echo "Укажите ID: make cron-disable ID=task_id"; exit 1; fi
-	$(COMPOSE_PROD) --profile cli run --rm cli cron enable $(ID) --disable
-
-cron-run: ## Выполнить cron задачу сейчас (использование: make cron-run ID=task_id FORCE=1)
-	@if [ -z "$(ID)" ]; then echo "Укажите ID: make cron-run ID=task_id"; exit 1; fi
-	@if [ -n "$(FORCE)" ]; then \
-		$(COMPOSE_PROD) --profile cli run --rm cli cron run $(ID) -f; \
-	else \
-		$(COMPOSE_PROD) --profile cli run --rm cli cron run $(ID); \
-	fi
 
 channels-status: ## Статус каналов
 	$(COMPOSE_PROD) --profile cli run --rm cli channels status
